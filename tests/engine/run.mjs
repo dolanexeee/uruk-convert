@@ -46,8 +46,8 @@ function run(cmd, args, opts = {}) {
   const r = spawnSync(cmd, args, { encoding: "utf8", env, timeout: 180_000, ...opts });
   return r;
 }
-function must(cmd, args) {
-  const r = run(cmd, args);
+function must(cmd, args, opts = {}) {
+  const r = run(cmd, args, opts);
   if (r.status !== 0) throw new Error(`${cmd} ${args.join(" ")} failed: ${r.stderr?.slice(-400)}`);
   return r.stdout ?? "";
 }
@@ -146,7 +146,9 @@ function probeFormat(path) {
   }
 }
 function identifyFormat(path) {
-  const r = run("convert", ["identify", "-format", "%m", path]);
+  // IM6 ships `identify` as its own binary; `magick identify` for IM7.
+  let r = run("identify", ["-format", "%m", path]);
+  if (r.status !== 0) r = run("magick", ["identify", "-format", "%m", path]);
   return (r.stdout ?? "").trim();
 }
 function sevenList(path) {

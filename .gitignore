@@ -11,3 +11,6 @@ src-tauri/binaries/uruk-*
 *.log
 qa/*.png
 !qa/.gitkeep
+
+# engine test scratch
+tests/engine/.work/

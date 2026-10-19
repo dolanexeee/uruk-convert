@@ -214,7 +214,13 @@ export default function App() {
   useEffect(() => {
     if (DEMO) return;
     let unlisten: (() => void) | undefined;
-    getCurrentWebview()
+    let webview;
+    try {
+      webview = getCurrentWebview();
+    } catch {
+      return; // not running inside Tauri (plain-browser preview)
+    }
+    webview
       .onDragDropEvent((event) => {
         const p = event.payload;
         if (p.type === "enter" || p.type === "over") {

@@ -45,13 +45,13 @@ export function onJobEvent(h: Handler): () => void {
     tauriListening = true;
     listen<{ id: string; percent: number }>("job-progress", (e) =>
       emit({ type: "progress", id: e.payload.id, percent: e.payload.percent }),
-    );
+    ).catch(() => undefined);
     listen<{ id: string; output: string; note?: string | null }>("job-done", (e) =>
       emit({ type: "done", id: e.payload.id, output: e.payload.output, note: e.payload.note }),
-    );
+    ).catch(() => undefined);
     listen<{ id: string; code: string; message: string }>("job-error", (e) =>
       emit({ type: "error", id: e.payload.id, code: e.payload.code, message: e.payload.message }),
-    );
+    ).catch(() => undefined);
   }
   return () => handlers.delete(h);
 }
