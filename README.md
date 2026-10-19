@@ -1,6 +1,19 @@
+<div align="center">
+
+<img src="src-tauri/icons/128x128@2x.png" width="118" alt="Uruk Convert logo" />
+
 # Uruk Convert — محوّل أوروك
 
 **A clean-room, open-source offline file converter for macOS, Windows and Linux.**
+
+[![Release](https://img.shields.io/github/v/release/dolanexeee/uruk-convert?style=flat-square&color=d9a441)](https://github.com/dolanexeee/uruk-convert/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square)](./LICENSE)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20·%20Windows%20·%20Linux-555?style=flat-square)](#-download)
+
+[**⬇ Download**](https://github.com/dolanexeee/uruk-convert/releases/latest) · [**🌐 Download page**](https://uruk-convert.vercel.app) · [**✔ Parity**](./PARITY.md)
+
+</div>
+
 Drag a file anywhere, tap a modifier key mid-drag, and a golden sun-disc
 wheel appears at your cursor — drop on a format and the file is converted,
 right there. Every conversion happens on your machine. Nothing is
@@ -12,6 +25,18 @@ File Converter" (feature reference only — no name, artwork, text, or code
 is shared). The full parity roadmap lives in [PARITY.md](PARITY.md) and
 is kept honest: a box is checked only when the feature ships and is
 proven by tests.
+
+## ⬇ Download
+
+**v1.0.0** — from the [latest release](https://github.com/dolanexeee/uruk-convert/releases/latest), or via the [download page](https://uruk-convert.vercel.app) with per-platform install instructions:
+
+| Platform | Get it |
+|---|---|
+| **macOS** | `.dmg` (Apple Silicon + Intel) |
+| **Windows** | `.exe` installer · `.msi` |
+| **Linux** | `.deb` · `.rpm` · `.AppImage` |
+
+All installers are built by this repository's own CI on every `v*` tag. Builds are **unsigned** — first-launch steps are under [Releases](#releases) below.
 
 ## What ships in v1.0
 
