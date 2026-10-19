@@ -1,10 +1,10 @@
 [workspace]
-members = [".", "crates/engine-core"]
+members = [".", "crates/engine-core", "crates/drag-sensor"]
 resolver = "2"
 
 [package]
 name = "uruk-convert"
-version = "0.2.0"
+version = "0.3.0"
 description = "Uruk Convert — clean-room, open-source offline file converter (desktop shell)"
 authors = ["URUK contributors"]
 edition = "2021"
@@ -18,8 +18,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uruk-engine-core = { path = "crates/engine-core" }
+uruk-drag-sensor = { path = "crates/drag-sensor" }

@@ -24,7 +24,10 @@ fn main() {
     let tools = Tools::resolve(&[]);
     match cmd {
         "tools" => {
-            println!("{}", serde_json::to_string_pretty(&tool_report(&tools)).unwrap());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&tool_report(&tools)).unwrap()
+            );
         }
         "analyze" => {
             let path = PathBuf::from(args.get(2).expect("path required"));

@@ -1,0 +1,15 @@
+# Uruk Convert — X11 end-to-end proof driver (QA only, not shipped).
+# Adapted from the Stage-3 spike's drag source: performs a REAL XDND v5
+# drag under Xvfb against the running product, presses SHIFT mid-drag,
+# discovers the product's native wheel overlay, computes the JPG segment
+# point from the overlay's real geometry, and drops on it.
+[package]
+name = "uruk-x11-e2e-driver"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+x11rb = { version = "0.13.2", features = ["xtest"] }
+
+[profile.release]
+debug = true

@@ -1,0 +1,12 @@
+[
+  {
+    "ts": 1792433638,
+    "input_name": "fixture.png",
+    "input_path": "/tmp/uruk-e2e-vRau4g/fixture.png",
+    "output_path": "/tmp/uruk-e2e-vRau4g/fixture.converted.jpg",
+    "target": "jpg",
+    "status": "done",
+    "error": null,
+    "origin": "overlay"
+  }
+]

@@ -33,7 +33,10 @@ pub struct EngineError {
 
 impl EngineError {
     fn new(code: &str, message: impl Into<String>) -> Self {
-        EngineError { code: code.into(), message: message.into() }
+        EngineError {
+            code: code.into(),
+            message: message.into(),
+        }
     }
     pub fn tool_missing(tool: &str) -> Self {
         Self::new(
@@ -49,7 +52,11 @@ impl EngineError {
     }
     pub fn failed(tool: &str, tail: &str) -> Self {
         let tail = tail.trim();
-        let tail = if tail.len() > 400 { &tail[tail.len() - 400..] } else { tail };
+        let tail = if tail.len() > 400 {
+            &tail[tail.len() - 400..]
+        } else {
+            tail
+        };
         Self::new(
             "tool_failed",
             format!("{tool} could not complete this conversion. Details: {tail}"),
@@ -88,7 +95,9 @@ pub enum Family {
 pub const IMAGE_EXTS: &[&str] = &[
     "jpg", "jpeg", "png", "webp", "heic", "heif", "tiff", "tif", "avif", "bmp", "svg",
 ];
-pub const AUDIO_EXTS: &[&str] = &["mp3", "m4a", "wav", "flac", "ogg", "opus", "aif", "aiff", "wma"];
+pub const AUDIO_EXTS: &[&str] = &[
+    "mp3", "m4a", "wav", "flac", "ogg", "opus", "aif", "aiff", "wma",
+];
 pub const VIDEO_EXTS: &[&str] = &["mp4", "mov", "mkv", "webm", "avi", "wmv", "gif"];
 pub const ARCHIVE_EXTS: &[&str] = &["zip", "tar", "gz", "tgz", "tar.gz", "rar"];
 pub const PDF_EXTS: &[&str] = &["pdf"];
@@ -131,7 +140,10 @@ pub const SUBTITLE_TARGETS: &[&str] = &["srt", "vtt", "txt"];
 
 /// Lowercased extension of a path, treating `.tar.gz` as one extension.
 pub fn extension_of(path: &Path) -> String {
-    let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
     if name.ends_with(".tar.gz") {
         return "tar.gz".into();
     }
@@ -339,8 +351,7 @@ impl Tools {
             }
         }
         let find = |base: &str, path_names: &[&str]| -> Option<PathBuf> {
-            find_in_dirs(&dirs, &sidecar_candidates(base))
-                .or_else(|| find_on_path(path_names))
+            find_in_dirs(&dirs, &sidecar_candidates(base)).or_else(|| find_on_path(path_names))
         };
 
         let ffmpeg = find("uruk-ffmpeg", &["ffmpeg", "ffmpeg.exe"]);
@@ -408,7 +419,8 @@ impl Tools {
                         (parts.next(), parts.next(), parts.next())
                     {
                         if mode.contains('w') {
-                            self.magick_writable.push(fmt.trim_end_matches('*').to_uppercase());
+                            self.magick_writable
+                                .push(fmt.trim_end_matches('*').to_uppercase());
                         }
                     }
                 }
@@ -467,10 +479,14 @@ pub fn probe(tools: &Tools, path: &Path) -> Probe {
             if let Some(out) = run_capture(
                 ffprobe,
                 &[
-                    "-v", "error",
-                    "-show_entries", "stream=codec_type,width,height",
-                    "-show_entries", "format=duration,format_name",
-                    "-of", "json",
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=codec_type,width,height",
+                    "-show_entries",
+                    "format=duration,format_name",
+                    "-of",
+                    "json",
                     &path.to_string_lossy(),
                 ],
             ) {
@@ -494,10 +510,14 @@ pub fn probe(tools: &Tools, path: &Path) -> Probe {
                     }
                     if let Some(fmt) = v.get("format") {
                         pr.duration = fmt.get("duration").and_then(|d| {
-                            d.as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| d.as_f64())
+                            d.as_str()
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .or_else(|| d.as_f64())
                         });
-                        pr.format_name =
-                            fmt.get("format_name").and_then(|f| f.as_str()).map(|s| s.to_string());
+                        pr.format_name = fmt
+                            .get("format_name")
+                            .and_then(|f| f.as_str())
+                            .map(|s| s.to_string());
                     }
                 }
             }
@@ -546,7 +566,11 @@ pub fn analyze(tools: &Tools, path: &Path) -> FileInfo {
     } else {
         std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
     };
-    let pr = if is_dir { Probe::default() } else { probe(tools, path) };
+    let pr = if is_dir {
+        Probe::default()
+    } else {
+        probe(tools, path)
+    };
     FileInfo {
         path: path.to_string_lossy().into_owned(),
         name: path
@@ -579,7 +603,10 @@ pub struct OutputSettings {
 
 impl Default for OutputSettings {
     fn default() -> Self {
-        OutputSettings { output_dir: None, suffix: "converted".into() }
+        OutputSettings {
+            output_dir: None,
+            suffix: "converted".into(),
+        }
     }
 }
 
@@ -589,10 +616,16 @@ pub fn output_path(input: &Path, target_ext: &str, settings: &OutputSettings) ->
         .as_ref()
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            input.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."))
+            input
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."))
         });
     let stem = {
-        let name = input.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = input
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let ext = extension_of(input);
         if ext.is_empty() {
             name.clone()
@@ -639,19 +672,60 @@ fn ffmpeg_video_args(input: &str, output: &str, target: &str) -> EngineResult<Ve
     let mut a: Vec<String> = vec![s("-y"), s("-i"), s(input)];
     match target {
         "mp4" | "mov" | "mkv" => {
-            a.extend(["-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k"].map(s));
+            a.extend(
+                [
+                    "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "160k",
+                ]
+                .map(s),
+            );
             if target == "mp4" {
                 a.extend(["-movflags", "+faststart"].map(s));
             }
         }
         "webm" => {
-            a.extend(["-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "30", "-deadline", "good", "-cpu-used", "2", "-c:a", "libopus", "-b:a", "128k"].map(s));
+            a.extend(
+                [
+                    "-c:v",
+                    "libvpx-vp9",
+                    "-b:v",
+                    "0",
+                    "-crf",
+                    "30",
+                    "-deadline",
+                    "good",
+                    "-cpu-used",
+                    "2",
+                    "-c:a",
+                    "libopus",
+                    "-b:a",
+                    "128k",
+                ]
+                .map(s),
+            );
         }
         "avi" => {
-            a.extend(["-c:v", "mpeg4", "-q:v", "4", "-c:a", "libmp3lame", "-q:a", "4"].map(s));
+            a.extend(
+                [
+                    "-c:v",
+                    "mpeg4",
+                    "-q:v",
+                    "4",
+                    "-c:a",
+                    "libmp3lame",
+                    "-q:a",
+                    "4",
+                ]
+                .map(s),
+            );
         }
         "wmv" => {
-            a.extend(["-c:v", "wmv2", "-b:v", "1400k", "-c:a", "wmav2", "-b:a", "128k"].map(s));
+            a.extend(
+                [
+                    "-c:v", "wmv2", "-b:v", "1400k", "-c:a", "wmav2", "-b:a", "128k",
+                ]
+                .map(s),
+            );
         }
         "gif" => {
             a.extend([
@@ -663,7 +737,11 @@ fn ffmpeg_video_args(input: &str, output: &str, target: &str) -> EngineResult<Ve
         "mp3" => {
             a.extend(["-vn", "-c:a", "libmp3lame", "-q:a", "2"].map(s));
         }
-        _ => return Err(EngineError::unsupported(format!("Cannot convert video to {target}."))),
+        _ => {
+            return Err(EngineError::unsupported(format!(
+                "Cannot convert video to {target}."
+            )))
+        }
     }
     a.push(s(output));
     Ok(a)
@@ -680,7 +758,11 @@ fn ffmpeg_audio_args(input: &str, output: &str, target: &str) -> EngineResult<Ve
         "opus" => a.extend(["-c:a", "libopus", "-b:a", "160k"].map(s)),
         "aiff" => a.extend(["-c:a", "pcm_s16be"].map(s)),
         "wma" => a.extend(["-c:a", "wmav2", "-b:a", "128k"].map(s)),
-        _ => return Err(EngineError::unsupported(format!("Cannot convert audio to {target}."))),
+        _ => {
+            return Err(EngineError::unsupported(format!(
+                "Cannot convert audio to {target}."
+            )))
+        }
     }
     a.push(s(output));
     Ok(a)
@@ -699,14 +781,28 @@ pub fn build_convert_command(
     let output_s = output.to_string_lossy().into_owned();
     match family {
         Family::Video => {
-            let ffmpeg = tools.ffmpeg.clone().ok_or_else(|| EngineError::tool_missing("FFmpeg"))?;
+            let ffmpeg = tools
+                .ffmpeg
+                .clone()
+                .ok_or_else(|| EngineError::tool_missing("FFmpeg"))?;
             let args = ffmpeg_video_args(&input_s, &output_s, target)?;
-            Ok(CommandSpec { program: ffmpeg, args, tool_name: "FFmpeg".into() })
+            Ok(CommandSpec {
+                program: ffmpeg,
+                args,
+                tool_name: "FFmpeg".into(),
+            })
         }
         Family::Audio => {
-            let ffmpeg = tools.ffmpeg.clone().ok_or_else(|| EngineError::tool_missing("FFmpeg"))?;
+            let ffmpeg = tools
+                .ffmpeg
+                .clone()
+                .ok_or_else(|| EngineError::tool_missing("FFmpeg"))?;
             let args = ffmpeg_audio_args(&input_s, &output_s, target)?;
-            Ok(CommandSpec { program: ffmpeg, args, tool_name: "FFmpeg".into() })
+            Ok(CommandSpec {
+                program: ffmpeg,
+                args,
+                tool_name: "FFmpeg".into(),
+            })
         }
         Family::Image => build_image_command(tools, &input_s, &output_s, target, image_quality),
         _ => Err(EngineError::unsupported(
@@ -724,7 +820,10 @@ fn build_image_command(
 ) -> EngineResult<CommandSpec> {
     // AVIF: prefer ImageMagick when its build can write AVIF, else ffmpeg.
     if target == "avif" && !tools.magick_can_write("AVIF") {
-        let ffmpeg = tools.ffmpeg.clone().ok_or_else(|| EngineError::tool_missing("FFmpeg"))?;
+        let ffmpeg = tools
+            .ffmpeg
+            .clone()
+            .ok_or_else(|| EngineError::tool_missing("FFmpeg"))?;
         if !tools.ffmpeg_has_muxer("avif") {
             return Err(EngineError::new(
                 "avif_unavailable",
@@ -740,7 +839,11 @@ fn build_image_command(
         args.extend(encoder.into_iter().map(s));
         args.extend(["-still-picture", "1", "-pix_fmt", "yuv420p"].map(s));
         args.push(s(output));
-        return Ok(CommandSpec { program: ffmpeg, args, tool_name: "FFmpeg".into() });
+        return Ok(CommandSpec {
+            program: ffmpeg,
+            args,
+            tool_name: "FFmpeg".into(),
+        });
     }
     if target == "heic" && !tools.magick_can_write("HEIC") && !tools.ffmpeg_has_muxer("heif") {
         return Err(EngineError::new(
@@ -765,7 +868,11 @@ fn build_image_command(
         // background/flatten after input is correct ordering.
     }
     args.push(s(output));
-    Ok(CommandSpec { program: magick, args, tool_name: "ImageMagick".into() })
+    Ok(CommandSpec {
+        program: magick,
+        args,
+        tool_name: "ImageMagick".into(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -801,7 +908,11 @@ pub fn parse_timestamp(raw: &str) -> Option<u64> {
             parts[1].parse::<u64>().ok()?,
             parts[2].parse::<u64>().ok()?,
         ),
-        2 => (0, parts[0].parse::<u64>().ok()?, parts[1].parse::<u64>().ok()?),
+        2 => (
+            0,
+            parts[0].parse::<u64>().ok()?,
+            parts[1].parse::<u64>().ok()?,
+        ),
         _ => return None,
     };
     let mut f = frac.to_string();
@@ -844,9 +955,12 @@ pub fn parse_cues(text: &str) -> Vec<Cue> {
         let (Some(start_ms), Some(end_ms)) = (start, end) else {
             continue;
         };
-        let text_lines: Vec<String> =
-            lines[tpos + 1..].iter().map(|l| l.to_string()).collect();
-        cues.push(Cue { start_ms, end_ms, lines: text_lines });
+        let text_lines: Vec<String> = lines[tpos + 1..].iter().map(|l| l.to_string()).collect();
+        cues.push(Cue {
+            start_ms,
+            end_ms,
+            lines: text_lines,
+        });
     }
     cues
 }
@@ -905,7 +1019,9 @@ pub fn subtitle_convert(text: &str, target: &str) -> EngineResult<String> {
         "srt" => Ok(write_srt(&cues)),
         "vtt" => Ok(write_vtt(&cues)),
         "txt" => Ok(cues_to_txt(&cues)),
-        other => Err(EngineError::unsupported(format!("Cannot convert subtitles to {other}."))),
+        other => Err(EngineError::unsupported(format!(
+            "Cannot convert subtitles to {other}."
+        ))),
     }
 }
 
@@ -941,7 +1057,10 @@ fn staging_dir(tag: &str) -> EngineResult<PathBuf> {
 /// File stem using the same extension rules as `output_path`
 /// (`.tar.gz` counts as one extension).
 fn stem_of(path: &Path) -> String {
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let ext = extension_of(path);
     if ext.is_empty() {
         name.clone()
@@ -981,7 +1100,10 @@ fn lo_convert(
     cancel: &Arc<AtomicBool>,
     progress: &mut dyn FnMut(f32),
 ) -> EngineResult<PathBuf> {
-    let soffice = tools.soffice.clone().ok_or_else(|| EngineError::tool_missing("LibreOffice"))?;
+    let soffice = tools
+        .soffice
+        .clone()
+        .ok_or_else(|| EngineError::tool_missing("LibreOffice"))?;
     let out_dir = staging.join("lo-out");
     let profile = staging.join("lo-profile");
     std::fs::create_dir_all(&out_dir)
@@ -1001,7 +1123,11 @@ fn lo_convert(
         out_dir.to_string_lossy().into_owned(),
         input.to_string_lossy().into_owned(),
     ]);
-    let cmd = CommandSpec { program: soffice, args, tool_name: "LibreOffice".into() };
+    let cmd = CommandSpec {
+        program: soffice,
+        args,
+        tool_name: "LibreOffice".into(),
+    };
     progress(-1.0);
     run_streaming(&cmd, None, cancel, progress)?;
     let produced = out_dir.join(format!("{}.{}", stem_of(input), produced_ext));
@@ -1024,14 +1150,21 @@ fn pandoc_convert(
     cancel: &Arc<AtomicBool>,
     progress: &mut dyn FnMut(f32),
 ) -> EngineResult<()> {
-    let pandoc = tools.pandoc.clone().ok_or_else(|| EngineError::tool_missing("Pandoc"))?;
+    let pandoc = tools
+        .pandoc
+        .clone()
+        .ok_or_else(|| EngineError::tool_missing("Pandoc"))?;
     let mut args: Vec<String> = vec![
         input.to_string_lossy().into_owned(),
         s("-o"),
         output.to_string_lossy().into_owned(),
     ];
     args.extend(extra.iter().cloned());
-    let cmd = CommandSpec { program: pandoc, args, tool_name: "Pandoc".into() };
+    let cmd = CommandSpec {
+        program: pandoc,
+        args,
+        tool_name: "Pandoc".into(),
+    };
     progress(-1.0);
     run_streaming(&cmd, None, cancel, progress)?;
     if !output.is_file() {
@@ -1051,8 +1184,10 @@ fn pdf_extract_text(
     cancel: &Arc<AtomicBool>,
     progress: &mut dyn FnMut(f32),
 ) -> EngineResult<PathBuf> {
-    let pdftotext =
-        tools.pdftotext.clone().ok_or_else(|| EngineError::tool_missing("poppler (pdftotext)"))?;
+    let pdftotext = tools
+        .pdftotext
+        .clone()
+        .ok_or_else(|| EngineError::tool_missing("poppler (pdftotext)"))?;
     let txt = staging.join("extracted.txt");
     let cmd = CommandSpec {
         program: pdftotext,
@@ -1067,7 +1202,10 @@ fn pdf_extract_text(
     progress(-1.0);
     run_streaming(&cmd, None, cancel, progress)?;
     if !txt.is_file() {
-        return Err(EngineError::new("tool_failed", "pdftotext produced no text file."));
+        return Err(EngineError::new(
+            "tool_failed",
+            "pdftotext produced no text file.",
+        ));
     }
     Ok(txt)
 }
@@ -1097,17 +1235,25 @@ fn rasterize_pdf(
     cancel: &Arc<AtomicBool>,
     progress: &mut dyn FnMut(f32),
 ) -> EngineResult<JobOutcome> {
-    let pdftoppm =
-        tools.pdftoppm.clone().ok_or_else(|| EngineError::tool_missing("poppler (pdftoppm)"))?;
+    let pdftoppm = tools
+        .pdftoppm
+        .clone()
+        .ok_or_else(|| EngineError::tool_missing("poppler (pdftoppm)"))?;
     let base = output_path(naming_input, target, settings);
-    let out_dir = base.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
+    let out_dir = base
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
     std::fs::create_dir_all(&out_dir)
         .map_err(|e| EngineError::new("io", format!("Cannot create output folder: {e}")))?;
     let base_stem = stem_of(&base);
     // Find a free page-name stem: <stem>, then "<stem> (2)", …
     let mut page_stem = base_stem.clone();
     let mut n = 2;
-    while out_dir.join(format!("{page_stem}-page-001.{target}")).exists() {
+    while out_dir
+        .join(format!("{page_stem}-page-001.{target}"))
+        .exists()
+    {
         page_stem = format!("{base_stem} ({n})");
         n += 1;
     }
@@ -1122,7 +1268,11 @@ fn rasterize_pdf(
     }
     args.push(pdf.to_string_lossy().into_owned());
     args.push(prefix.to_string_lossy().into_owned());
-    let cmd = CommandSpec { program: pdftoppm, args, tool_name: "poppler".into() };
+    let cmd = CommandSpec {
+        program: pdftoppm,
+        args,
+        tool_name: "poppler".into(),
+    };
     progress(-1.0);
     run_streaming(&cmd, None, cancel, progress)?;
     // pdftoppm writes <prefix><N>.<ext> with N padded to the page-count
@@ -1134,7 +1284,10 @@ fn rasterize_pdf(
     if let Ok(rd) = std::fs::read_dir(&out_dir) {
         for e in rd.flatten() {
             let p = e.path();
-            let name = p.file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = p
+                .file_name()
+                .map(|x| x.to_string_lossy().into_owned())
+                .unwrap_or_default();
             if let Some(mid) = name
                 .strip_prefix(&want_prefix)
                 .and_then(|rest| rest.strip_suffix(&want_suffix))
@@ -1147,7 +1300,10 @@ fn rasterize_pdf(
     }
     produced.sort();
     if produced.is_empty() {
-        return Err(EngineError::new("tool_failed", "pdftoppm produced no page images."));
+        return Err(EngineError::new(
+            "tool_failed",
+            "pdftoppm produced no page images.",
+        ));
     }
     // Two passes through temp names so renames can never collide.
     let mut finals: Vec<PathBuf> = Vec::new();
@@ -1300,13 +1456,20 @@ fn convert_document(
                     }
                     let tmp_docx = staging.join("pre.docx");
                     pandoc_convert(tools, input, &tmp_docx, &[], cancel, progress)?;
-                    lo_convert(tools, &tmp_docx, "pdf", "pdf", None, &staging, &out, cancel, progress)?;
+                    lo_convert(
+                        tools, &tmp_docx, "pdf", "pdf", None, &staging, &out, cancel, progress,
+                    )?;
                 }
                 _ => {
-                    lo_convert(tools, input, "pdf", "pdf", None, &staging, &out, cancel, progress)?;
+                    lo_convert(
+                        tools, input, "pdf", "pdf", None, &staging, &out, cancel, progress,
+                    )?;
                 }
             }
-            return Ok(JobOutcome { output: out.clone(), note: None });
+            return Ok(JobOutcome {
+                output: out.clone(),
+                note: None,
+            });
         }
         // --- EPUB input: only Pandoc can read it.
         if in_ext == "epub" {
@@ -1323,7 +1486,10 @@ fn convert_document(
             let tmp = staging.join(format!("out.{target}"));
             pandoc_convert(tools, input, &tmp, &extra, cancel, progress)?;
             move_file(&tmp, &out)?;
-            return Ok(JobOutcome { output: out.clone(), note: None });
+            return Ok(JobOutcome {
+                output: out.clone(),
+                note: None,
+            });
         }
         // --- Markdown output strictly needs Pandoc.
         if target == "md" {
@@ -1333,7 +1499,10 @@ fn convert_document(
             let tmp = staging.join("out.md");
             pandoc_convert(tools, input, &tmp, &[], cancel, progress)?;
             move_file(&tmp, &out)?;
-            return Ok(JobOutcome { output: out.clone(), note: None });
+            return Ok(JobOutcome {
+                output: out.clone(),
+                note: None,
+            });
         }
         // --- html / epub / txt / docx: Pandoc preferred, LibreOffice
         // fallback (its filters cover all four targets).
@@ -1349,9 +1518,14 @@ fn convert_document(
             pandoc_convert(tools, input, &tmp, &extra, cancel, progress)?;
             move_file(&tmp, &out)?;
         } else {
-            lo_convert(tools, input, target, target, None, &staging, &out, cancel, progress)?;
+            lo_convert(
+                tools, input, target, target, None, &staging, &out, cancel, progress,
+            )?;
         }
-        Ok(JobOutcome { output: out.clone(), note: None })
+        Ok(JobOutcome {
+            output: out.clone(),
+            note: None,
+        })
     })();
     let _ = std::fs::remove_dir_all(&staging);
     result
@@ -1369,8 +1543,13 @@ fn convert_slides(
         "pdf" => {
             let staging = staging_dir("slides")?;
             let out = output_path(input, "pdf", settings);
-            let result = lo_convert(tools, input, "pdf", "pdf", None, &staging, &out, cancel, progress)
-                .map(|o| JobOutcome { output: o, note: None });
+            let result = lo_convert(
+                tools, input, "pdf", "pdf", None, &staging, &out, cancel, progress,
+            )
+            .map(|o| JobOutcome {
+                output: o,
+                note: None,
+            });
             let _ = std::fs::remove_dir_all(&staging);
             result
         }
@@ -1380,13 +1559,17 @@ fn convert_slides(
             let staging = staging_dir("slides")?;
             let result = (|| -> EngineResult<JobOutcome> {
                 let pdf = staging.join("deck.pdf");
-                lo_convert(tools, input, "pdf", "pdf", None, &staging, &pdf, cancel, progress)?;
+                lo_convert(
+                    tools, input, "pdf", "pdf", None, &staging, &pdf, cancel, progress,
+                )?;
                 rasterize_pdf(tools, &pdf, input, target, settings, cancel, progress)
             })();
             let _ = std::fs::remove_dir_all(&staging);
             result
         }
-        other => Err(EngineError::unsupported(format!("Cannot convert slides to {other}."))),
+        other => Err(EngineError::unsupported(format!(
+            "Cannot convert slides to {other}."
+        ))),
     }
 }
 
@@ -1429,8 +1612,10 @@ fn convert_spreadsheet(
         "tsv" => Some("Text - txt - csv (StarCalc):9,34,76"),
         _ => None,
     };
-    let result = lo_convert(tools, input, spec, target, infilter, &staging, &out, cancel, progress)
-        .map(|o| JobOutcome { output: o, note });
+    let result = lo_convert(
+        tools, input, spec, target, infilter, &staging, &out, cancel, progress,
+    )
+    .map(|o| JobOutcome { output: o, note });
     let _ = std::fs::remove_dir_all(&staging);
     result
 }
@@ -1454,7 +1639,10 @@ fn convert_subtitle(
     std::fs::write(&out, converted)
         .map_err(|e| EngineError::new("io", format!("Cannot save the subtitle file: {e}")))?;
     progress(100.0);
-    Ok(JobOutcome { output: out, note: None })
+    Ok(JobOutcome {
+        output: out,
+        note: None,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1515,7 +1703,10 @@ pub struct JobOutcome {
 fn parse_ffmpeg_time(line: &str) -> Option<f64> {
     let idx = line.find("time=")?;
     let rest = &line[idx + 5..];
-    let token: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == ':' || *c == '.').collect();
+    let token: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == ':' || *c == '.')
+        .collect();
     let parts: Vec<&str> = token.split(':').collect();
     if parts.len() == 3 {
         let h: f64 = parts[0].parse().ok()?;
@@ -1567,7 +1758,12 @@ fn run_streaming_in(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| EngineError::new("spawn_failed", format!("Could not start {}: {e}", spec.tool_name)))?;
+        .map_err(|e| {
+            EngineError::new(
+                "spawn_failed",
+                format!("Could not start {}: {e}", spec.tool_name),
+            )
+        })?;
 
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     let mut handles = Vec::new();
@@ -1608,8 +1804,10 @@ fn run_streaming_in(
                 Ok(line) => {
                     if let Some(idx) = line.find("Duration:") {
                         let rest = line[idx + "Duration:".len()..].trim_start();
-                        let token: String =
-                            rest.chars().take_while(|c| c.is_ascii_digit() || *c == ':' || *c == '.').collect();
+                        let token: String = rest
+                            .chars()
+                            .take_while(|c| c.is_ascii_digit() || *c == ':' || *c == '.')
+                            .collect();
                         let parts: Vec<&str> = token.split(':').collect();
                         if parts.len() == 3 {
                             if let (Ok(h), Ok(m), Ok(sec)) = (
@@ -1658,7 +1856,10 @@ fn run_streaming_in(
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(40)),
             Err(e) => {
-                return Err(EngineError::new("spawn_failed", format!("{} failed: {e}", spec.tool_name)));
+                return Err(EngineError::new(
+                    "spawn_failed",
+                    format!("{} failed: {e}", spec.tool_name),
+                ));
             }
         }
     }
@@ -1672,13 +1873,23 @@ pub fn run_job(
     progress: &mut dyn FnMut(f32),
 ) -> EngineResult<JobOutcome> {
     match job {
-        JobSpec::Convert { input, target, output_dir, suffix, image_quality } => {
+        JobSpec::Convert {
+            input,
+            target,
+            output_dir,
+            suffix,
+            image_quality,
+        } => {
             let input_path = PathBuf::from(input);
-            let settings = OutputSettings { output_dir: output_dir.clone(), suffix: suffix.clone() };
+            let settings = OutputSettings {
+                output_dir: output_dir.clone(),
+                suffix: suffix.clone(),
+            };
             let output = output_path(&input_path, target, &settings);
             if let Some(parent) = output.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| EngineError::new("io", format!("Cannot create output folder: {e}")))?;
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    EngineError::new("io", format!("Cannot create output folder: {e}"))
+                })?;
             }
             // Media → MP3 needs an audio stream; fail in plain language.
             let family = family_of(&input_path, false);
@@ -1692,9 +1903,7 @@ pub fn run_job(
             // Archive → archive means "repack the contents", never nesting
             // the archive file inside a new one.
             if family == Family::Archive {
-                return repack_archive(
-                    tools, &input_path, target, &settings, cancel, progress,
-                );
+                return repack_archive(tools, &input_path, target, &settings, cancel, progress);
             }
             // Stage 2 families have their own multi-step runners.
             match family {
@@ -1702,13 +1911,27 @@ pub fn run_job(
                     return convert_pdf(tools, &input_path, target, &settings, cancel, progress);
                 }
                 Family::Document => {
-                    return convert_document(tools, &input_path, target, &settings, cancel, progress);
+                    return convert_document(
+                        tools,
+                        &input_path,
+                        target,
+                        &settings,
+                        cancel,
+                        progress,
+                    );
                 }
                 Family::Slides => {
                     return convert_slides(tools, &input_path, target, &settings, cancel, progress);
                 }
                 Family::Spreadsheet => {
-                    return convert_spreadsheet(tools, &input_path, target, &settings, cancel, progress);
+                    return convert_spreadsheet(
+                        tools,
+                        &input_path,
+                        target,
+                        &settings,
+                        cancel,
+                        progress,
+                    );
                 }
                 Family::Subtitle => {
                     return convert_subtitle(&input_path, target, &settings, progress);
@@ -1720,21 +1943,39 @@ pub fn run_job(
             run_streaming(&spec, pr.duration, cancel, progress)?;
             Ok(JobOutcome { output, note: None })
         }
-        JobSpec::CompressImage { input, mode, value, output_dir, suffix } => {
-            compress_image(tools, input, mode, *value, output_dir, suffix, cancel, progress)
-        }
+        JobSpec::CompressImage {
+            input,
+            mode,
+            value,
+            output_dir,
+            suffix,
+        } => compress_image(
+            tools, input, mode, *value, output_dir, suffix, cancel, progress,
+        ),
         JobSpec::ExtractArchive { input, output_dir } => {
-            let sevenz = tools.sevenz.clone().ok_or_else(|| EngineError::tool_missing("7-Zip"))?;
+            let sevenz = tools
+                .sevenz
+                .clone()
+                .ok_or_else(|| EngineError::tool_missing("7-Zip"))?;
             let input_path = PathBuf::from(input);
             let stem = {
-                let name = input_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let name = input_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 let ext = extension_of(&input_path);
-                if ext.is_empty() { name.clone() } else { name[..name.len() - ext.len() - 1].to_string() }
+                if ext.is_empty() {
+                    name.clone()
+                } else {
+                    name[..name.len() - ext.len() - 1].to_string()
+                }
             };
-            let base_dir = output_dir
-                .as_ref()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| input_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from(".")));
+            let base_dir = output_dir.as_ref().map(PathBuf::from).unwrap_or_else(|| {
+                input_path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from("."))
+            });
             let mut dest = base_dir.join(format!("{stem}.extracted"));
             let mut n = 2;
             while dest.exists() {
@@ -1755,11 +1996,17 @@ pub fn run_job(
             };
             progress(-1.0);
             run_streaming(&spec, None, cancel, progress)?;
-            Ok(JobOutcome { output: dest, note: None })
+            Ok(JobOutcome {
+                output: dest,
+                note: None,
+            })
         }
-        JobSpec::CreateArchive { inputs, format, output_dir, suffix } => {
-            create_archive(tools, inputs, format, output_dir, suffix, cancel, progress)
-        }
+        JobSpec::CreateArchive {
+            inputs,
+            format,
+            output_dir,
+            suffix,
+        } => create_archive(tools, inputs, format, output_dir, suffix, cancel, progress),
     }
 }
 
@@ -1773,7 +2020,10 @@ fn repack_archive(
     cancel: &Arc<AtomicBool>,
     progress: &mut dyn FnMut(f32),
 ) -> EngineResult<JobOutcome> {
-    let sevenz = tools.sevenz.clone().ok_or_else(|| EngineError::tool_missing("7-Zip"))?;
+    let sevenz = tools
+        .sevenz
+        .clone()
+        .ok_or_else(|| EngineError::tool_missing("7-Zip"))?;
     let tmp = std::env::temp_dir().join(format!("uruk-repack-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)
@@ -1809,8 +2059,18 @@ fn repack_archive(
         let (t, ext_note) = match target {
             "zip" => ("zip", None),
             "tar" => ("tar", None),
-            "gz" => ("tar", Some("GZIP archives hold one stream, so the contents were packed as TAR.GZ.".to_string())),
-            other => return Err(EngineError::unsupported(format!("Cannot repack to {other}."))),
+            "gz" => (
+                "tar",
+                Some(
+                    "GZIP archives hold one stream, so the contents were packed as TAR.GZ."
+                        .to_string(),
+                ),
+            ),
+            other => {
+                return Err(EngineError::unsupported(format!(
+                    "Cannot repack to {other}."
+                )))
+            }
         };
         let final_output = if target == "gz" {
             output_path(input_path, "tar.gz", settings)
@@ -1828,11 +2088,22 @@ fn repack_archive(
                     .unwrap_or_else(|| e.clone())
             })
             .collect();
-        let mut args2: Vec<String> = vec![s("a"), format!("-t{t}"), final_output.to_string_lossy().into_owned()];
+        let mut args2: Vec<String> = vec![
+            s("a"),
+            format!("-t{t}"),
+            final_output.to_string_lossy().into_owned(),
+        ];
         args2.extend(rel_args);
-        let spec2 = CommandSpec { program: sevenz.clone(), args: args2, tool_name: "7-Zip".into() };
+        let spec2 = CommandSpec {
+            program: sevenz.clone(),
+            args: args2,
+            tool_name: "7-Zip".into(),
+        };
         run_streaming_in(&spec2, Some(&tmp), None, cancel, progress)?;
-        Ok(JobOutcome { output: final_output, note: ext_note })
+        Ok(JobOutcome {
+            output: final_output,
+            note: ext_note,
+        })
     });
     let _ = std::fs::remove_dir_all(&tmp);
     result
@@ -1847,7 +2118,10 @@ fn create_archive(
     cancel: &Arc<AtomicBool>,
     progress: &mut dyn FnMut(f32),
 ) -> EngineResult<JobOutcome> {
-    let sevenz = tools.sevenz.clone().ok_or_else(|| EngineError::tool_missing("7-Zip"))?;
+    let sevenz = tools
+        .sevenz
+        .clone()
+        .ok_or_else(|| EngineError::tool_missing("7-Zip"))?;
     if inputs.is_empty() {
         return Err(EngineError::unsupported("No files were given to archive."));
     }
@@ -1862,12 +2136,26 @@ fn create_archive(
             if inputs.len() == 1 && !any_dir {
                 ("gzip", "gz".to_string(), None)
             } else {
-                ("tar", "tar.gz".to_string(), Some("GZIP archives hold one file, so the selection was packed as TAR.GZ.".to_string()))
+                (
+                    "tar",
+                    "tar.gz".to_string(),
+                    Some(
+                        "GZIP archives hold one file, so the selection was packed as TAR.GZ."
+                            .to_string(),
+                    ),
+                )
             }
         }
-        other => return Err(EngineError::unsupported(format!("Unknown archive format {other}."))),
+        other => {
+            return Err(EngineError::unsupported(format!(
+                "Unknown archive format {other}."
+            )))
+        }
     };
-    let settings = OutputSettings { output_dir: output_dir.clone(), suffix: suffix.to_string() };
+    let settings = OutputSettings {
+        output_dir: output_dir.clone(),
+        suffix: suffix.to_string(),
+    };
     let output = output_path(&first, &out_ext, &settings);
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)
@@ -1883,7 +2171,9 @@ fn create_archive(
             if p.is_dir() {
                 p.parent().map(|x| x.to_path_buf()).unwrap_or(p.clone())
             } else {
-                p.parent().map(|x| x.to_path_buf()).unwrap_or_else(|| PathBuf::from("."))
+                p.parent()
+                    .map(|x| x.to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from("."))
             }
         })
         .collect();
@@ -1892,7 +2182,11 @@ fn create_archive(
     } else {
         None
     };
-    let mut args: Vec<String> = vec![s("a"), format!("-t{sevenz_type}"), output.to_string_lossy().into_owned()];
+    let mut args: Vec<String> = vec![
+        s("a"),
+        format!("-t{sevenz_type}"),
+        output.to_string_lossy().into_owned(),
+    ];
     match &shared_parent {
         Some(_) => {
             for i in inputs {
@@ -1910,7 +2204,11 @@ fn create_archive(
             }
         }
     }
-    let spec = CommandSpec { program: sevenz, args, tool_name: "7-Zip".into() };
+    let spec = CommandSpec {
+        program: sevenz,
+        args,
+        tool_name: "7-Zip".into(),
+    };
     progress(-1.0);
     run_streaming_in(&spec, shared_parent.as_deref(), None, cancel, progress)?;
     Ok(JobOutcome { output, note })
@@ -1935,23 +2233,40 @@ fn compress_image(
     let input_path = PathBuf::from(input);
     let original = std::fs::metadata(&input_path).map(|m| m.len()).unwrap_or(0) as f64;
     if original <= 0.0 {
-        return Err(EngineError::new("io", "The source image could not be read."));
+        return Err(EngineError::new(
+            "io",
+            "The source image could not be read.",
+        ));
     }
     let target_bytes = match mode {
         "percent" => original * (1.0 - value.clamp(1.0, 95.0) / 100.0),
         "target" => value.max(1024.0),
-        other => return Err(EngineError::unsupported(format!("Unknown compress mode {other}."))),
+        other => {
+            return Err(EngineError::unsupported(format!(
+                "Unknown compress mode {other}."
+            )))
+        }
     };
     let ext = extension_of(&input_path);
-    let out_ext = if ext == "png" { "jpg".to_string() } else { ext.clone() };
+    let out_ext = if ext == "png" {
+        "jpg".to_string()
+    } else {
+        ext.clone()
+    };
     // PNG has no quality knob that reliably shrinks photos; re-encode lossy
     // formats to themselves and PNG to JPG, saying so in the result note.
     let note = if ext == "png" {
-        Some("PNG is lossless, so the compressed copy was saved as JPG to reach the target size.".to_string())
+        Some(
+            "PNG is lossless, so the compressed copy was saved as JPG to reach the target size."
+                .to_string(),
+        )
     } else {
         None
     };
-    let settings = OutputSettings { output_dir: output_dir.clone(), suffix: suffix.to_string() };
+    let settings = OutputSettings {
+        output_dir: output_dir.clone(),
+        suffix: suffix.to_string(),
+    };
     let output = output_path(&input_path, &out_ext, &settings);
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)
@@ -1971,13 +2286,20 @@ fn compress_image(
         args.push(s(input));
         args.extend(["-quality".into(), q.to_string()]);
         args.push(temp.to_string_lossy().into_owned());
-        let spec = CommandSpec { program: magick.clone(), args, tool_name: "ImageMagick".into() };
+        let spec = CommandSpec {
+            program: magick.clone(),
+            args,
+            tool_name: "ImageMagick".into(),
+        };
         run_streaming(&spec, None, cancel, &mut |_| {})?;
-        let size = std::fs::metadata(&temp).map(|m| m.len()).unwrap_or(u64::MAX) as f64;
+        let size = std::fs::metadata(&temp)
+            .map(|m| m.len())
+            .unwrap_or(u64::MAX) as f64;
         progress(((i as f32 + 1.0) / total) * 100.0);
         if size <= target_bytes || *q == 12 {
-            std::fs::rename(&temp, &output)
-                .map_err(|e| EngineError::new("io", format!("Cannot save compressed image: {e}")))?;
+            std::fs::rename(&temp, &output).map_err(|e| {
+                EngineError::new("io", format!("Cannot save compressed image: {e}"))
+            })?;
             return Ok(JobOutcome { output, note });
         }
     }
@@ -1990,19 +2312,86 @@ fn compress_image(
 
 pub fn tool_report(tools: &Tools) -> HashMap<String, String> {
     let mut m = HashMap::new();
-    m.insert("ffmpeg".into(), tools.ffmpeg.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "MISSING".into()));
-    m.insert("ffprobe".into(), tools.ffprobe.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "MISSING".into()));
+    m.insert(
+        "ffmpeg".into(),
+        tools
+            .ffmpeg
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "MISSING".into()),
+    );
+    m.insert(
+        "ffprobe".into(),
+        tools
+            .ffprobe
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "MISSING".into()),
+    );
     m.insert(
         "magick".into(),
-        tools.magick.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "MISSING".into()),
+        tools
+            .magick
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "MISSING".into()),
     );
-    m.insert("sevenz".into(), tools.sevenz.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "MISSING".into()));
-    m.insert("soffice".into(), tools.soffice.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "MISSING".into()));
-    m.insert("pandoc".into(), tools.pandoc.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "MISSING".into()));
-    m.insert("pdftoppm".into(), tools.pdftoppm.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "MISSING".into()));
-    m.insert("pdftotext".into(), tools.pdftotext.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "MISSING".into()));
-    m.insert("pdfimages".into(), tools.pdfimages.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "MISSING".into()));
-    m.insert("pdfinfo".into(), tools.pdfinfo.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "MISSING".into()));
+    m.insert(
+        "sevenz".into(),
+        tools
+            .sevenz
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "MISSING".into()),
+    );
+    m.insert(
+        "soffice".into(),
+        tools
+            .soffice
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "MISSING".into()),
+    );
+    m.insert(
+        "pandoc".into(),
+        tools
+            .pandoc
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "MISSING".into()),
+    );
+    m.insert(
+        "pdftoppm".into(),
+        tools
+            .pdftoppm
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "MISSING".into()),
+    );
+    m.insert(
+        "pdftotext".into(),
+        tools
+            .pdftotext
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "MISSING".into()),
+    );
+    m.insert(
+        "pdfimages".into(),
+        tools
+            .pdfimages
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "MISSING".into()),
+    );
+    m.insert(
+        "pdfinfo".into(),
+        tools
+            .pdfinfo
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "MISSING".into()),
+    );
     m.insert("magick_writable".into(), tools.magick_writable.join(","));
     m.insert("ffmpeg_muxers".into(), tools.ffmpeg_muxers.join(","));
     m
@@ -2030,7 +2419,10 @@ mod tests {
         assert!(t.contains(&"jpg".to_string()));
         assert!(!t.contains(&"png".to_string()));
         let t = targets_for(Path::new("photo.jpeg"), false);
-        assert!(!t.contains(&"jpg".to_string()), "jpeg normalizes to jpg identity");
+        assert!(
+            !t.contains(&"jpg".to_string()),
+            "jpeg normalizes to jpg identity"
+        );
         let t = targets_for(Path::new("movie.mp4"), false);
         assert!(t.contains(&"mp3".to_string()), "video offers MP3 export");
         let t = targets_for(Path::new("mystery.bin"), false);
@@ -2048,10 +2440,16 @@ mod tests {
         std::fs::write(&input, b"x").unwrap();
         let settings = OutputSettings::default();
         let out1 = output_path(&input, "jpg", &settings);
-        assert_eq!(out1.file_name().unwrap().to_string_lossy(), "photo.converted.jpg");
+        assert_eq!(
+            out1.file_name().unwrap().to_string_lossy(),
+            "photo.converted.jpg"
+        );
         std::fs::write(&out1, b"x").unwrap();
         let out2 = output_path(&input, "jpg", &settings);
-        assert_eq!(out2.file_name().unwrap().to_string_lossy(), "photo.converted (2).jpg");
+        assert_eq!(
+            out2.file_name().unwrap().to_string_lossy(),
+            "photo.converted (2).jpg"
+        );
     }
 
     #[test]
@@ -2062,7 +2460,10 @@ mod tests {
 
     #[test]
     fn ffmpeg_time_parse() {
-        assert_eq!(parse_ffmpeg_time("frame= 1 time=00:00:02.50 bitrate"), Some(2.5));
+        assert_eq!(
+            parse_ffmpeg_time("frame= 1 time=00:00:02.50 bitrate"),
+            Some(2.5)
+        );
         assert_eq!(parse_ffmpeg_time("no time here"), None);
     }
 
@@ -2082,9 +2483,18 @@ mod tests {
         assert_eq!(family_of(Path::new("book.epub"), false), Family::Document);
         assert_eq!(family_of(Path::new("deck.pptx"), false), Family::Slides);
         assert_eq!(family_of(Path::new("deck.ppt"), false), Family::Slides);
-        assert_eq!(family_of(Path::new("sheet.xlsx"), false), Family::Spreadsheet);
-        assert_eq!(family_of(Path::new("sheet.csv"), false), Family::Spreadsheet);
-        assert_eq!(family_of(Path::new("sheet.xls"), false), Family::Spreadsheet);
+        assert_eq!(
+            family_of(Path::new("sheet.xlsx"), false),
+            Family::Spreadsheet
+        );
+        assert_eq!(
+            family_of(Path::new("sheet.csv"), false),
+            Family::Spreadsheet
+        );
+        assert_eq!(
+            family_of(Path::new("sheet.xls"), false),
+            Family::Spreadsheet
+        );
         assert_eq!(family_of(Path::new("subs.srt"), false), Family::Subtitle);
         assert_eq!(family_of(Path::new("subs.vtt"), false), Family::Subtitle);
     }
@@ -2099,21 +2509,35 @@ mod tests {
         assert!(t.contains(&"xlsx".to_string()));
         assert!(!t.contains(&"xls".to_string()), "xls is input-only");
         let t = targets_for(Path::new("notes.markdown"), false);
-        assert!(!t.contains(&"md".to_string()), "markdown normalizes to md identity");
+        assert!(
+            !t.contains(&"md".to_string()),
+            "markdown normalizes to md identity"
+        );
         assert!(t.contains(&"pdf".to_string()));
         let t = targets_for(Path::new("subs.srt"), false);
         assert_eq!(t, vec!["vtt".to_string(), "txt".to_string()]);
         let t = targets_for(Path::new("deck.ppt"), false);
-        assert_eq!(t, vec!["pdf".to_string(), "jpg".to_string(), "png".to_string()]);
+        assert_eq!(
+            t,
+            vec!["pdf".to_string(), "jpg".to_string(), "png".to_string()]
+        );
     }
 
     #[test]
     fn timestamp_parse_and_format() {
         assert_eq!(parse_timestamp("01:02:03,456"), Some(3_723_456));
         assert_eq!(parse_timestamp("01:02:03.456"), Some(3_723_456));
-        assert_eq!(parse_timestamp("02:03.5"), Some(123_500), "MM:SS.mmm, .5 = 500ms");
+        assert_eq!(
+            parse_timestamp("02:03.5"),
+            Some(123_500),
+            "MM:SS.mmm, .5 = 500ms"
+        );
         assert_eq!(parse_timestamp("00:00:01,05"), Some(1_050), ",05 = 50ms");
-        assert_eq!(parse_timestamp("100:00:00,000"), Some(360_000_000), "hours overflow");
+        assert_eq!(
+            parse_timestamp("100:00:00,000"),
+            Some(360_000_000),
+            "hours overflow"
+        );
         assert_eq!(parse_timestamp("garbage"), None);
         assert_eq!(format_timestamp(3_723_456, ','), "01:02:03,456");
         assert_eq!(format_timestamp(360_000_000, '.'), "100:00:00.000");

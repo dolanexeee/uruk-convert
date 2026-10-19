@@ -33,6 +33,18 @@ DOCX-from-text) and is the only EPUB reader; **poppler** owns PDF
 rasterization (all pages, 300 DPI) and text extraction; subtitles are
 converted in pure Rust inside the engine (millisecond-exact).
 
+**Stage 3 status: the interaction layer shipped** — the app is now a
+background agent (tray/menu bar, no main window at launch; the window
+is settings / history / fallback-drop). The global drag → modifier →
+wheel-overlay gesture is **proven end-to-end on Linux/X11** (scripted
+XDND proof, see Core Experience), **implemented and cross-type-checked
+but not yet runtime-proven on macOS and Windows** (marked
+implemented-pending-CI-proof wherever claimed), and ships as a
+**standing-orb tier on Wayland**, whose compositors forbid bystander
+drag observation by design. Engine unchanged: all 75 integration checks
+stay green. See `REPORT-STAGE-3.md` for the proof ledger and every
+asterisk.
+
 ---
 
 ## Images — 57 conversions
@@ -222,19 +234,57 @@ Shipped extras (not reference items):
 - [x] **The wheel** — radial sun-disc menu on drop of a single file,
   showing only valid targets for that file's family; click a segment
   to convert
-- [ ] **Interaction model — global drag overlay (dedicated stage).**
-  The reference is a *background utility*, not an app window: the user
-  drags a file anywhere in the OS, taps a modifier mid-drag, and the
-  wheel appears at the cursor as an overlay; tool segments open small
-  floating HUD panels. The window shipped in Stages 1–2 is the
-  settings / history / fallback surface only. The overlay is a
-  dedicated stage and will call this same engine layer — engine-core
-  has no UI coupling (the test CLI already drives it headlessly).
+- [x] **Interaction model — global drag overlay (Stage 3, shipped).**
+  The reference is a *background utility*, not an app window — and so
+  is this: the app launches to the tray/menu bar with no window; the
+  user drags a file anywhere in the OS, taps a modifier mid-drag
+  (Shift by default, configurable), and the wheel appears at the
+  cursor as a native overlay; dropping on a segment converts via
+  engine-core and answers with a small floating toast. The window is
+  the settings / history / fallback-drop surface only, opened from
+  the tray. One `DragSensor` trait, one shared native wheel renderer
+  (the Stage 1 wheel design: lapis disc, gold/bronze segments,
+  Shamash hub) behind every platform module. Proof levels differ per
+  platform and are stated exactly:
+  - **Linux/X11 — PROVEN IN-APP.** Full path: XFixes
+    selection-ownership detection + `XdndTypeList` classification +
+    bystander payload peek, native override-redirect overlay that
+    joins the drag via XDND v5 (anchored at the summon point), drop →
+    engine-core → native toast + persistent history. Scripted
+    end-to-end proof under Xvfb with a real XDND source
+    (`qa/x11-e2e/run-e2e.sh`): PNG dragged across the root window,
+    Shift, drop on JPG → converted JPG next to the fixture, history
+    records origin `overlay`, screenshot of the real wheel mid-drag
+    in `qa/x11-e2e/artifacts/`. Latency (release builds, two runs incl.
+    one against the shipped .deb's own binary): modifier edge →
+    wheel mapped 10–15 ms (incl. engine analyze), first paint
+    complete 17–22 ms — see REPORT-STAGE-3.md for the full ledger.
+  - **macOS — implemented, pending CI proof.** Listen-only
+    `CGEventTap` + drag-pasteboard classification, non-activating
+    `NSPanel` overlay registered as a dragging destination,
+    Accessibility permission ladder with an honest degraded mode.
+    Type-checks for `aarch64-apple-darwin` and `x86_64-apple-darwin`;
+    NOT runtime-proven (no Mac in the build environment).
+  - **Windows — implemented, pending CI proof.** `WH_MOUSE_LL` /
+    `WH_KEYBOARD_LL` hook sensing, layered `WS_POPUP` overlay with a
+    real `IDropTarget` (CF_HDROP verification, documented fast
+    hand-back for non-file drags), `UpdateLayeredWindow` rendering.
+    Type-checks for `x86_64-pc-windows-gnu`; NOT runtime-proven.
+  - **Wayland — orb tier (compositor-imposed).** Wayland forbids
+    bystander drag observation by design, so the global gesture
+    cannot exist there — this is the one OS-imposed asterisk. Where
+    the compositor offers layer-shell + data-control (wlroots, KDE):
+    a persistent floating orb accepts drops and routes them into the
+    normal pipeline. On GNOME/Mutter: the fallback drop window plus
+    honest in-app copy stating the matrix (Settings → Session tier).
 - [x] Conversion queue: per-file progress, cancel, plain-language errors
 - [x] Output next to the source (`name.converted.ext`) or to a chosen
   folder; never overwrites the source
 - [x] Settings: output folder, name suffix, image quality, language,
-  wheel behavior (documented placeholder)
+  summon modifier (Shift/Control/Alt), autostart, sensing on/off —
+  persisted Rust-side so the global overlay and window jobs share one
+  output policy; conversion history persisted Rust-side (window +
+  overlay origins) and shown in the window
 - [x] Arabic + English UI (Arabic first, full RTL)
 - [x] Fully local: zero network use; bundled FFmpeg / ImageMagick /
   7-Zip / Pandoc sidecars; LibreOffice and poppler resolved where
@@ -268,3 +318,44 @@ Shipped extras (not reference items):
   builds exist (shared-library tools). The Linux `.deb` declares
   `poppler-utils` in Depends; Windows community builds ship DLL trees
   (packaging pending); macOS packaging pending — same Stage 4 pass.
+
+## Platform notes (Stage 3 — interaction layer)
+
+- **X11 (proven)**: the sensor is a bystander — it never grabs the
+  pointer or the drag. Classification reads the source's world-readable
+  `XdndTypeList`; paths arrive via an opportunistic bystander selection
+  peek (GTK/Qt/generic sources answer) or, failing that, as the entered
+  target. The overlay window sets `XdndAware` before mapping and is
+  *anchored* at the summon point (a following overlay makes its own
+  segments unreachable). Sources send `XdndDrop` after the physical
+  button release; a 600 ms grace window absorbs that. Esc cancels the
+  summon for the rest of that drag. On a system without a tray host the
+  agent still runs — the tray is best-effort, sensing is not.
+- **macOS (implemented-pending-CI-proof)**: listen-only `CGEventTap`
+  (mouse + flags changed) + drag pasteboard type inspection; overlay
+  is a pre-created non-activating `NSPanel` registered for `.fileURL`
+  drops; the shared pixmap renderer feeds an `NSImageView`. Without
+  Accessibility (+ Input Monitoring) permission the ladder degrades
+  honestly: menu-bar/Dock drop target and in-window drops keep
+  working, and the app says so (toast + settings) instead of failing
+  silently. Autostart = per-user LaunchAgent. UIAccessibility /
+  notarization behavior on a real Mac is exactly what CI proof must
+  establish.
+- **Windows (implemented-pending-CI-proof)**: no global drag API
+  exists, so low-level mouse/keyboard hooks sense the gesture and OLE
+  verifies it: the layered overlay registers an `IDropTarget` only
+  while summoned, confirms `CF_HDROP` on `DragEnter`, and for
+  non-file drags answers `DROPEFFECT_NONE`, hides and revokes fast
+  (<50 ms budget) so the drag continues to its real target — the
+  hand-back is the sharp edge of this design. UIPI asterisk: drops
+  *from* elevated processes into our non-elevated overlay are blocked
+  by Windows itself. Rendering is the shared pixmap via
+  `UpdateLayeredWindow` (premultiplied BGRA). Autostart = `HKCU\Run`.
+- **Wayland (orb tier)**: session tier is probed at runtime (env +
+  live registry roundtrip for `zwlr_layer_shell_v1` /
+  data-control globals) and stated in Settings in plain language.
+  wlroots/KDE: standing 96×96 layer-shell orb, bottom-right; drops
+  deliver `text/uri-list` through `wl_data_device`. GNOME/Mutter:
+  neither global exists → fallback drop window + honest note. No
+  Wayland path can summon mid-drag; that is a protocol limit, not an
+  implementation gap.

@@ -4,16 +4,25 @@ import {
   analyzePaths,
   cancelJob,
   DEMO,
+  getAgentSettings,
+  historyList,
+  onHistoryUpdated,
   onJobEvent,
+  onOrbDrop,
   openPath,
   pickFiles,
   pickFolder,
   pickOutputDir,
   revealInFolder,
+  sensorStatus,
+  setAgentSettings,
   startJob,
   toolsReport,
+  type AgentSettings,
   type FileInfo,
+  type HistoryRecord,
   type JobSpec,
+  type SensorStatus,
 } from "./lib/api";
 import { dict, errorLabel, familyLabel, formatBytes, type Lang } from "./lib/i18n";
 import Wheel from "./components/Wheel";
@@ -98,6 +107,11 @@ export default function App() {
   const [tools, setTools] = useState<Record<string, string> | null>(null);
   const rowsRef = useRef<Row[]>([]);
   rowsRef.current = rows;
+  // Stage 3: background-agent state (Rust-persisted), conversion history,
+  // and the honest per-session sensor/tier status.
+  const [agent, setAgent] = useState<AgentSettings | null>(null);
+  const [history, setHistory] = useState<HistoryRecord[]>([]);
+  const [sensorStat, setSensorStat] = useState<SensorStatus | null>(null);
 
   useEffect(() => {
     localStorage.setItem("uruk-convert-settings", JSON.stringify(settings));
@@ -136,6 +150,43 @@ export default function App() {
     if (settings.outputMode === "custom" && settings.customDir) return settings.customDir;
     return null;
   }, [settings]);
+
+  // -- Stage 3: agent settings / history / status ---------------------------
+  useEffect(() => {
+    getAgentSettings().then(setAgent).catch(() => undefined);
+    sensorStatus().then(setSensorStat).catch(() => undefined);
+    historyList().then(setHistory).catch(() => undefined);
+    return onHistoryUpdated((rec) =>
+      setHistory((prev) => [rec, ...prev].slice(0, 300)),
+    );
+  }, []);
+
+  const updateAgent = useCallback((patch: Partial<AgentSettings>) => {
+    setAgent((prev) => {
+      if (!prev) return prev;
+      const next = { ...prev, ...patch };
+      setAgentSettings(next);
+      return next;
+    });
+  }, []);
+
+  // Mirror the webview's output preferences into the Rust-side agent
+  // settings so overlay (global wheel) conversions land exactly where
+  // window jobs do, with the same suffix and quality.
+  useEffect(() => {
+    if (!agent) return;
+    const next: AgentSettings = {
+      ...agent,
+      lang,
+      output_dir: outputDirFor(),
+      suffix: settings.suffix === "none" ? "" : "converted",
+      image_quality: settings.imageQuality,
+    };
+    if (JSON.stringify(next) !== JSON.stringify(agent)) {
+      setAgent(next);
+      setAgentSettings(next);
+    }
+  }, [agent, lang, settings, outputDirFor]);
 
   const launchRow = useCallback(
     (row: Row) => {
@@ -239,6 +290,10 @@ export default function App() {
       .catch(() => undefined);
     return () => unlisten?.();
   }, [handlePaths]);
+
+  // Wayland orb tier: drops on the standing orb open this window with the
+  // files routed through the normal pipeline.
+  useEffect(() => onOrbDrop((paths) => void handlePaths(paths)), [handlePaths]);
 
   // Demo mode: auto-open the wheel for screenshots/design review.
   useEffect(() => {
@@ -402,6 +457,50 @@ export default function App() {
             <p className="setting-note">{t.wheelBehaviorNote}</p>
           </div>
           <div className="setting-row">
+            <label>{t.agentTitle}</label>
+            <p className="setting-note">{t.agentNote}</p>
+          </div>
+          <div className="setting-row">
+            <label>{t.summonKey}</label>
+            <div className="setting-controls">
+              <select
+                className="target-select"
+                value={agent?.modifier ?? "shift"}
+                onChange={(e) => updateAgent({ modifier: e.target.value })}
+                aria-label={t.summonKey}
+              >
+                <option value="shift">{t.keyShift}</option>
+                <option value="control">{t.keyControl}</option>
+                <option value="alt">{t.keyAlt}</option>
+              </select>
+            </div>
+          </div>
+          <div className="setting-row">
+            <label>{t.autostart}</label>
+            <input
+              type="checkbox"
+              checked={agent?.autostart ?? false}
+              onChange={(e) => updateAgent({ autostart: e.target.checked })}
+            />
+          </div>
+          <div className="setting-row">
+            <label>{t.sensing}</label>
+            <input
+              type="checkbox"
+              checked={agent?.sensing ?? true}
+              onChange={(e) => updateAgent({ sensing: e.target.checked })}
+            />
+          </div>
+          {sensorStat && (
+            <div className="setting-row">
+              <label>{t.sessionTier}</label>
+              <p className="setting-note">
+                {sensorStat.platform}
+                {sensorStat.note ? ` — ${sensorStat.note}` : ""}
+              </p>
+            </div>
+          )}
+          <div className="setting-row">
             <label>{t.toolsTitle}</label>
             <p className="setting-note">
               {t.toolsNote}{" "}
@@ -560,6 +659,63 @@ export default function App() {
             </ul>
           </section>
         )}
+
+        <section className="queue history">
+          <div className="queue-head">
+            <h2>{t.historyTitle}</h2>
+          </div>
+          {history.length === 0 ? (
+            <p className="setting-note">{t.historyEmpty}</p>
+          ) : (
+            <ul className="rows">
+              {history.slice(0, 40).map((h, i) => (
+                <li
+                  key={`${h.ts}-${h.input_path}-${i}`}
+                  className={`row status-${h.status === "done" ? "done" : "error"}`}
+                >
+                  <div className="row-main">
+                    <div className="row-name" title={h.input_path}>
+                      {h.input_name}{" "}
+                      <span className="hist-arrow">→ {h.target.toUpperCase()}</span>
+                    </div>
+                    <div className="row-meta">
+                      <span className="badge">
+                        {h.origin === "overlay" ? t.historyOverlay : t.historyWindow}
+                      </span>
+                      <span>
+                        {new Date(h.ts * 1000).toLocaleString(lang === "ar" ? "ar" : "en")}
+                      </span>
+                      <span
+                        className={`status-text st-${h.status === "done" ? "done" : "error"}`}
+                      >
+                        {h.status === "done" ? t.statusDone : t.statusError}
+                      </span>
+                    </div>
+                    {h.status === "error" && h.error && (
+                      <div className="row-error">{h.error}</div>
+                    )}
+                    {h.status === "done" && h.output_path && (
+                      <div className="row-output" title={h.output_path}>
+                        → {h.output_path.split("/").pop()}
+                      </div>
+                    )}
+                  </div>
+                  {h.status === "done" && h.output_path && (
+                    <div className="row-actions">
+                      <button
+                        type="button"
+                        className="ghost small"
+                        onClick={() => revealInFolder(h.output_path!)}
+                      >
+                        {t.reveal}
+                      </button>
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
       </main>
 
       <footer className="footer">
@@ -643,6 +799,33 @@ export default function App() {
       )}
 
       {dragging && <div className="drag-veil">{t.dropHere}</div>}
+
+      {agent && !agent.onboarding_done && (
+        <div className="modal-backdrop" role="presentation">
+          <div className="modal onboarding" role="dialog" aria-label={t.onboardingTitle}>
+            <div className="onboarding-disc">
+              <SunDisc size={64} />
+            </div>
+            <h3>{t.onboardingTitle}</h3>
+            <p className="onboarding-body">{t.onboardingBody}</p>
+            {sensorStat?.platform === "macos" && (
+              <p className="setting-note">{t.onboardingPermMac}</p>
+            )}
+            {sensorStat?.platform.startsWith("wayland") && (
+              <p className="setting-note">{t.onboardingPermWayland}</p>
+            )}
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="primary"
+                onClick={() => updateAgent({ onboarding_done: true })}
+              >
+                {t.onboardingGotIt}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

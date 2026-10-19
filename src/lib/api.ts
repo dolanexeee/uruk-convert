@@ -169,3 +169,88 @@ export function openPath(path: string): void {
   if (DEMO) return;
   void invoke("open_path", { path });
 }
+
+// ---------------------------------------------------------------------------
+// Stage 3: background agent settings, persistent history, sensor status
+// ---------------------------------------------------------------------------
+
+export interface AgentSettings {
+  lang: string;
+  modifier: string; // "shift" | "control" | "alt"
+  autostart: boolean;
+  sensing: boolean;
+  onboarding_done: boolean;
+  output_dir: string | null;
+  suffix: string; // "converted" | ""
+  image_quality: number;
+}
+
+export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
+  lang: "ar",
+  modifier: "shift",
+  autostart: false,
+  sensing: true,
+  onboarding_done: false,
+  output_dir: null,
+  suffix: "converted",
+  image_quality: 92,
+};
+
+export async function getAgentSettings(): Promise<AgentSettings> {
+  if (DEMO) return { ...DEFAULT_AGENT_SETTINGS, onboarding_done: true };
+  return invoke<AgentSettings>("get_agent_settings");
+}
+
+export function setAgentSettings(settings: AgentSettings): void {
+  if (DEMO) return;
+  void invoke("set_agent_settings", { settings });
+}
+
+export interface HistoryRecord {
+  ts: number; // unix seconds
+  input_name: string;
+  input_path: string;
+  output_path: string | null;
+  target: string;
+  status: "done" | "error";
+  error: string | null;
+  origin: "overlay" | "window";
+}
+
+export async function historyList(): Promise<HistoryRecord[]> {
+  if (DEMO) return [];
+  return invoke<HistoryRecord[]>("history_list");
+}
+
+export function onHistoryUpdated(h: (rec: HistoryRecord) => void): () => void {
+  if (DEMO) return () => undefined;
+  let un: (() => void) | undefined;
+  listen<HistoryRecord>("history-updated", (e) => h(e.payload))
+    .then((u) => {
+      un = u;
+    })
+    .catch(() => undefined);
+  return () => un?.();
+}
+
+export interface SensorStatus {
+  platform: string;
+  note: string;
+}
+
+export async function sensorStatus(): Promise<SensorStatus> {
+  if (DEMO) return { platform: "demo", note: "" };
+  return invoke<SensorStatus>("sensor_status");
+}
+
+/** Wayland orb tier: files dropped on the standing orb arrive here. */
+export function onOrbDrop(h: (paths: string[]) => void): () => void {
+  if (DEMO) return () => undefined;
+  let un: (() => void) | undefined;
+  listen<string[]>("orb-drop", (e) => h(e.payload))
+    .then((u) => {
+      un = u;
+    })
+    .catch(() => undefined);
+  return () => un?.();
+}
