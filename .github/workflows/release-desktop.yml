@@ -4,10 +4,10 @@ name: Release Desktop
 # macOS and attaches them to the GitHub Release for v* tags. Also runnable
 # manually (workflow_dispatch) — then installers land as run artifacts.
 #
-# NOTE: this workflow mirrors the proven Uruk Cut pipeline. macOS jobs are
-# expected to be partial until the ImageMagick / 7-Zip macOS sidecars land
-# (see PARITY.md platform notes) — fail-fast is off so one platform's gap
-# never blocks the others.
+# NOTE: this workflow mirrors the proven Uruk Cut pipeline. Sidecars are
+# staged per platform by scripts/fetch-sidecars.sh and smoke-verified
+# before the build (see PARITY.md platform notes) — fail-fast is off so
+# one platform's gap never blocks the others.
 
 on:
   push:
@@ -71,8 +71,100 @@ jobs:
         shell: bash
         run: bash scripts/fetch-sidecars.sh "${{ matrix.triple }}"
 
+      - name: Smoke-verify staged sidecars
+        shell: bash
+        run: |
+          B=src-tauri/binaries
+          T="${RUNNER_TEMP:-/tmp}"
+          ls -la "$B"
+          case "${{ matrix.triple }}" in
+            *linux-gnu)
+              "$B/uruk-ffmpeg-${{ matrix.triple }}" -version | head -1
+              "$B/uruk-pandoc-${{ matrix.triple }}" --version | head -1
+              "$B/uruk-7z-${{ matrix.triple }}" | head -2
+              ;;
+            *windows-msvc)
+              "$B/uruk-ffmpeg-${{ matrix.triple }}.exe" -version | head -1
+              "$B/uruk-pandoc-${{ matrix.triple }}.exe" --version | head -1
+              if [ -f "$B/uruk-magick-${{ matrix.triple }}.exe" ]; then
+                "$B/uruk-magick-${{ matrix.triple }}.exe" -version
+                "$B/uruk-magick-${{ matrix.triple }}.exe" -size 8x8 xc:#3366ff "$T/smoke.png"
+                "$B/uruk-magick-${{ matrix.triple }}.exe" "$T/smoke.png" "$T/smoke.jpg"
+                test -s "$T/smoke.jpg" && echo "WINDOWS MAGICK CONVERT OK"
+              else
+                echo "::warning::Windows ImageMagick sidecar missing (fetch warned)"
+              fi
+              if [ -f "$B/pdftoppm.exe" ]; then "$B/pdftoppm.exe" -v 2>&1 | head -1;
+              else echo "::warning::Windows poppler tools missing (fetch warned)"; fi
+              ;;
+            *apple-darwin)
+              "$B/uruk-ffmpeg-${{ matrix.triple }}" -version | head -1
+              "$B/uruk-pandoc-${{ matrix.triple }}" --version | head -1
+              "$B/uruk-7z-${{ matrix.triple }}" | head -2
+              if [ -f "$B/uruk-magick-${{ matrix.triple }}" ]; then
+                "$B/uruk-magick-${{ matrix.triple }}" -version
+                "$B/uruk-magick-${{ matrix.triple }}" -size 8x8 xc:#3366ff "$T/smoke.png"
+                "$B/uruk-magick-${{ matrix.triple }}" "$T/smoke.png" "$T/smoke.jpg"
+                test -s "$T/smoke.jpg" && echo "MACOS MAGICK CONVERT OK"
+              else
+                echo "::warning::macOS ImageMagick bundle missing for ${{ matrix.triple }} (fetch warned)"
+              fi
+              ;;
+          esac
+
+      - name: Engine integration suite (Linux — full proof on the tagged tree)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ghostscript poppler-utils libreoffice
+          npm run test:engine
+
       - name: Build Tauri app
         run: npm run tauri build -- --target ${{ matrix.triple }}
+
+      - name: macOS post-build smoke (bundled magick + agent launch)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        shell: bash
+        run: |
+          APP="src-tauri/target/${{ matrix.triple }}/release/bundle/macos/Uruk Convert.app"
+          ls "$APP/Contents/Resources/binaries" || true
+          if [ -f "$APP/Contents/Resources/binaries/uruk-magick-${{ matrix.triple }}" ]; then
+            "$APP/Contents/Resources/binaries/uruk-magick-${{ matrix.triple }}" -size 8x8 xc:#3366ff /tmp/app-smoke.png \
+              && test -s /tmp/app-smoke.png && echo "IN-APP MAGICK OK"
+          fi
+          # Launch smoke ONLY: CI runners cannot grant Accessibility, so
+          # the drag sensor degrades by design; what we prove here is
+          # that the agent process starts and stays alive.
+          "$APP/Contents/MacOS/uruk-convert" &
+          PID=$!
+          sleep 6
+          if kill -0 "$PID" 2>/dev/null; then
+            echo "LAUNCH SMOKE: agent alive after 6s"
+            kill "$PID" || true
+          else
+            echo "LAUNCH SMOKE: agent exited within 6s"
+            wait "$PID" || true
+          fi
+
+      - name: Windows post-build launch smoke
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $exe = "src-tauri/target/${{ matrix.triple }}/release/uruk-convert.exe"
+          if (Test-Path $exe) {
+            $p = Start-Process -FilePath $exe -PassThru
+            Start-Sleep -Seconds 5
+            if (!$p.HasExited) {
+              Write-Host "LAUNCH SMOKE: agent alive after 5s"
+              Stop-Process -Id $p.Id -Force
+            } else {
+              Write-Host "LAUNCH SMOKE: agent exited within 5s (exit $($p.ExitCode))"
+            }
+          } else {
+            Write-Host "LAUNCH SMOKE: exe not found at $exe"
+          }
 
       - name: Upload installers as artifacts
         uses: actions/upload-artifact@v4

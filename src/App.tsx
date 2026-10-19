@@ -535,9 +535,11 @@ export default function App() {
             <p className="setting-note">
               {t.toolsNote}{" "}
               {tools &&
-                (["ffmpeg", "magick", "sevenz"] as const)
-                  .map((k) => `${k === "sevenz" ? "7-Zip" : k}: ${tools[k] && tools[k] !== "MISSING" ? "✓" : "✗"}`)
+                (["ffmpeg", "magick", "sevenz", "soffice"] as const)
+                  .map((k) => `${k === "sevenz" ? "7-Zip" : k === "soffice" ? "LibreOffice" : k}: ${tools[k] && tools[k] !== "MISSING" ? "✓" : "✗"}`)
                   .join(" · ")}
+              <br />
+              {t.libreOfficeNote}
             </p>
           </div>
         </section>

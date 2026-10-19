@@ -281,6 +281,11 @@ pub struct Tools {
     pub ghostscript: Option<PathBuf>,
     /// poppler-utils: PDF merger (split/rotate/redact page assembly).
     pub pdfunite: Option<PathBuf>,
+    /// macOS `sips` — Apple's platform image tool. Resolved on macOS
+    /// only in practice (it ships with the OS) and used solely as the
+    /// HEIC *encoder*: the open toolchains ship no HEIC encoder, but
+    /// every Mac has one built in.
+    pub sips: Option<PathBuf>,
     /// Uppercase ImageMagick formats writable by this build (from `-list format`).
     pub magick_writable: Vec<String>,
     /// ffmpeg muxer names (from `-muxers`), e.g. contains "avif".
@@ -356,7 +361,15 @@ impl Tools {
             }
         }
         let find = |base: &str, path_names: &[&str]| -> Option<PathBuf> {
-            find_in_dirs(&dirs, &sidecar_candidates(base)).or_else(|| find_on_path(path_names))
+            // Bundled sidecars carry the `uruk-` prefix (+ target triple);
+            // some bundled tools keep their plain upstream name even inside
+            // the sidecar dirs (e.g. the Windows ImageMagick / poppler
+            // files staged flat next to the prefixed sidecars) — search
+            // the dirs for those too before falling back to PATH.
+            let plain: Vec<String> = path_names.iter().map(|n| n.to_string()).collect();
+            find_in_dirs(&dirs, &sidecar_candidates(base))
+                .or_else(|| find_in_dirs(&dirs, &plain))
+                .or_else(|| find_on_path(path_names))
         };
 
         let ffmpeg = find("uruk-ffmpeg", &["ffmpeg", "ffmpeg.exe"]);
@@ -370,6 +383,7 @@ impl Tools {
         let pdfinfo = find("uruk-pdfinfo", &["pdfinfo", "pdfinfo.exe"]);
         let ghostscript = find("uruk-gs", &["gs", "gs.exe"]);
         let pdfunite = find("uruk-pdfunite", &["pdfunite", "pdfunite.exe"]);
+        let sips = find("uruk-sips", &["sips"]);
 
         // ImageMagick: prefer a real `magick` binary; fall back to `convert`.
         let (magick, magick_is_convert) = match find("uruk-magick", &["magick", "magick.exe"]) {
@@ -406,6 +420,7 @@ impl Tools {
             pdfinfo,
             ghostscript,
             pdfunite,
+            sips,
             magick_writable: Vec::new(),
             ffmpeg_muxers: Vec::new(),
             ffmpeg_encoders: Vec::new(),
@@ -855,6 +870,27 @@ fn build_image_command(
         });
     }
     if target == "heic" && !tools.magick_can_write("HEIC") && !tools.ffmpeg_has_muxer("heif") {
+        // macOS ships a native HEIC encoder in `sips` (every Mac has
+        // one) — route through it there. Other platforms keep the
+        // honest refusal: no open toolchain encodes HEIC.
+        #[cfg(target_os = "macos")]
+        if let Some(sips) = &tools.sips {
+            return Ok(CommandSpec {
+                program: sips.clone(),
+                args: vec![
+                    s("-s"),
+                    s("format"),
+                    s("heic"),
+                    s("-s"),
+                    s("formatOptions"),
+                    quality.to_string(),
+                    s(input),
+                    s("--out"),
+                    s(output),
+                ],
+                tool_name: "sips".into(),
+            });
+        }
         return Err(EngineError::new(
             "heic_encode_unavailable",
             "HEIC export is not available in the bundled tools on this platform yet (HEIC files can still be opened and converted to other formats).",
@@ -3587,6 +3623,29 @@ pub fn tool_report(tools: &Tools) -> HashMap<String, String> {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "MISSING".into()),
     );
+    m.insert(
+        "sips".into(),
+        tools
+            .sips
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "MISSING".into()),
+    );
+    // The LibreOffice policy, stated plainly for the in-app tools
+    // report: LibreOffice is NEVER bundled (a ~284 MB suite); it is
+    // detected from a system install. Without it, the documents,
+    // slides and spreadsheets families and PDF export are unavailable
+    // and every affected conversion says so in plain language.
+    m.insert(
+        "libreoffice_policy".into(),
+        match &tools.soffice {
+            Some(p) => format!(
+                "System LibreOffice detected at {} — used for documents, slides, spreadsheets and PDF export. LibreOffice is not bundled with Uruk Convert.",
+                p.display()
+            ),
+            None => "LibreOffice NOT installed — it is detected from the system, never bundled. Documents, slides, spreadsheets and PDF export are unavailable until LibreOffice is installed.".into(),
+        },
+    );
     m.insert("magick_writable".into(), tools.magick_writable.join(","));
     m.insert("ffmpeg_muxers".into(), tools.ffmpeg_muxers.join(","));
     m
@@ -3595,6 +3654,57 @@ pub fn tool_report(tools: &Tools) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Tools with nothing resolved (all capabilities empty).
+    fn bare_tools() -> Tools {
+        Tools {
+            ffmpeg: None,
+            ffprobe: None,
+            magick: None,
+            magick_is_convert: false,
+            sevenz: None,
+            soffice: None,
+            pandoc: None,
+            pdftoppm: None,
+            pdftotext: None,
+            pdfimages: None,
+            pdfinfo: None,
+            ghostscript: None,
+            pdfunite: None,
+            sips: None,
+            magick_writable: Vec::new(),
+            ffmpeg_muxers: Vec::new(),
+            ffmpeg_encoders: Vec::new(),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn heic_routes_to_sips_on_macos() {
+        // Argument-construction proof for the macOS HEIC route: with no
+        // magick HEIC writer and no ffmpeg heif muxer, a `sips` on the
+        // system turns PNG → HEIC into a sips invocation. (Runtime
+        // proof needs a real Mac; sips itself ships with macOS.)
+        let mut tools = bare_tools();
+        tools.sips = Some(PathBuf::from("/usr/bin/sips"));
+        let spec = build_image_command(&tools, "in.png", "out.heic", "heic", 90)
+            .expect("sips route must build a command");
+        assert_eq!(spec.program, PathBuf::from("/usr/bin/sips"));
+        assert_eq!(spec.tool_name, "sips");
+        assert!(spec.args.windows(2).any(|w| w == ["format", "heic"]));
+        assert_eq!(spec.args.last().map(String::as_str), Some("out.heic"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn heic_refused_without_an_encoder() {
+        // On Linux/Windows no open toolchain encodes HEIC: the engine
+        // must refuse plainly, never fake the conversion.
+        let tools = bare_tools();
+        let err = build_image_command(&tools, "in.png", "out.heic", "heic", 90)
+            .expect_err("HEIC without an encoder must be refused");
+        assert_eq!(err.code, "heic_encode_unavailable");
+    }
 
     #[test]
     fn families_classify() {

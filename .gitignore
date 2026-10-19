@@ -5,7 +5,8 @@ dist/
 # rust
 src-tauri/target/
 # sidecar binaries (fetched by scripts/fetch-sidecars.sh — large, per-OS)
-src-tauri/binaries/uruk-*
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep
 # misc
 .DS_Store
 *.log

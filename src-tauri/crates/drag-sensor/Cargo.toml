@@ -1,6 +1,6 @@
 [package]
 name = "uruk-drag-sensor"
-version = "0.4.0"
+version = "1.0.0"
 description = "Uruk Convert — global drag sensing + native wheel overlay (per-platform modules behind one DragSensor trait)"
 authors = ["URUK contributors"]
 edition = "2021"
