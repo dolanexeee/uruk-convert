@@ -492,7 +492,10 @@ single run:
   PNG→JPG conversion in the job. Post-build launch smoke: the agent
   process starts and stays alive. The mid-drag wheel itself cannot
   be exercised by a CI runner — it remains **implemented,
-  build-proven, runtime pending**.
+  build-proven, runtime pending**. **⚠ v1.0.0's sensor was in fact
+  silently dead — found by the owner's first real-machine test and
+  fixed in v1.0.1; see the Stage 5.1 notes below and
+  `REPORT-STAGE-5.1.md`.**
 - **macOS — built and partially smoke-proven; drag runtime pending a
   real machine.** FFmpeg/FFprobe (osxexperts static), Pandoc 3.5
   and 7-Zip staged and version-proven inside the shipped .app.
@@ -513,3 +516,55 @@ single run:
   language and shows LibreOffice detected/absent; without it the
   document/slide/spreadsheet rows are unavailable with a clear
   message, everything else works.
+
+## Platform notes (Stage 5.1 — v1.0.1: the Windows sensor post-mortem)
+
+- **What happened.** The owner installed v1.0.0 on a real Windows
+  laptop: tray icon present, app running — and the drag wheel never
+  appeared, from the desktop or Explorer, for a text file or an
+  image. The sensor was **silently dead**, not merely unproven.
+- **Root cause (code-proven, `drag-sensor/src/windows.rs`).** The
+  8 ms queue-drain timer was created as a *thread timer*,
+  `SetTimer(null_mut(), TIMER_ID, 8, None)`, and the message loop
+  ticked only on `WM_TIMER` with `wParam == TIMER_ID` (0x5543). For
+  a NULL-hWnd timer the system **ignores the requested ID** and
+  assigns its own — available only via `SetTimer`'s return value,
+  which the code discarded (and whose failure it never checked).
+  Every `WM_TIMER` therefore carried a different ID, the match
+  never fired, and `SensorCore::tick` — the only drain of the hook
+  queue, the only feeder of the gesture tracker, and the only
+  processor of shell commands (toasts, panels, shutdown) — **never
+  ran once**. The hooks worked; everything behind them was dead
+  code. Nothing ever errored, which is why the tray, the process
+  and CI's "agent alive after 5 s" smoke all looked healthy. The
+  shell compounded it: a `sensor.start()` error went only to
+  `eprintln!` (invisible in a Windows GUI app) while the Settings
+  platform note kept claiming "windows".
+- **The v1.0.1 fix.** The timer now lives on a message-only host
+  window (`UrukConvertSensorHost`); hWnd timers honor their ID, its
+  proc runs `tick` on `WM_TIMER` and posts `WM_QUIT` when the core
+  shuts down. `SetTimer`'s result is checked; host-window, timer,
+  hook and OLE failures return real errors. The sensor **reports
+  its own liveness**: an `sensor_armed` notice once hooks + timer
+  are live (Settings note shows it), and a start failure becomes
+  the Settings platform note (`FAILED — <reason>`) **and** an
+  error toast. A persistent diagnostic log at
+  `%APPDATA%\org.uruk.convert\sensor.log` (append, flushed per
+  line, rotated at 256 KB) records start, hooks, arming, the first
+  tick, drag candidates, summon decisions (including why-not),
+  overlay show/failures, DragEnter verdicts, handbacks and drops —
+  a silent death can no longer hide.
+- **Parity fix in the same pass.** The gesture tracker now learns
+  the held-modifier set from every chord record and summons as a
+  drag *confirms* when the chord is already down (held before the
+  press, or pressed under the threshold) — the held-modifier
+  fallback macOS already had. (Not the cause of the v1.0.0 failure:
+  the owner's mid-drag tap takes the edge path.)
+- **Status after v1.0.1.** Windows: **implemented, build-proven
+  (CI release run green, all seven assets), root cause removed —
+  runtime re-verdict pending the owner's retest**, which now
+  produces evidence either way (Settings note + `sensor.log`).
+  macOS and Linux sensors are untouched (platform code is
+  cfg-isolated; the shell's new notice handling is additive — new
+  codes other platforms never emit — and the X11 path plus the
+  engine carry no behavioral changes).
