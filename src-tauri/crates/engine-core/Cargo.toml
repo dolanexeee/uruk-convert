@@ -1,0 +1,15 @@
+[package]
+name = "uruk-engine-core"
+version = "0.1.0"
+description = "Uruk Convert — conversion engine layer (ffmpeg / ImageMagick / 7-Zip sidecars)"
+authors = ["URUK contributors"]
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bin]]
+name = "engine-cli"
+path = "src/bin/engine_cli.rs"

@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Uruk Convert app icon: golden Shamash-style sun disc on lapis lazuli.
+       Original artwork for the URUK suite. -->
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="38%" r="80%">
+      <stop offset="0%" stop-color="#1b3a6b"/>
+      <stop offset="100%" stop-color="#071630"/>
+    </radialGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#e7c65a"/>
+      <stop offset="100%" stop-color="#b08d57"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="200" fill="url(#bg)"/>
+  <!-- outer ring -->
+  <circle cx="512" cy="512" r="392" fill="none" stroke="url(#gold)" stroke-width="34"/>
+  <!-- eight wedge rays -->
+  <g fill="url(#gold)">
+    <polygon points="512,150 556,330 468,330"/>
+    <polygon points="874,512 694,556 694,468"/>
+    <polygon points="512,874 468,694 556,694"/>
+    <polygon points="150,512 330,468 330,556"/>
+    <polygon points="768,256 648,380 612,300"/>
+    <polygon points="768,768 612,724 648,644"/>
+    <polygon points="256,768 380,648 300,612"/>
+    <polygon points="256,256 412,300 376,380"/>
+  </g>
+  <!-- eight-point star -->
+  <polygon fill="url(#gold)" points="512,300 565,435 700,382 592,483 724,512 592,541 700,642 565,589 512,724 459,589 324,642 432,541 300,512 432,483 324,382 459,435"/>
+  <circle cx="512" cy="512" r="74" fill="#071630" stroke="url(#gold)" stroke-width="16"/>
+  <circle cx="512" cy="512" r="30" fill="url(#gold)"/>
+</svg>

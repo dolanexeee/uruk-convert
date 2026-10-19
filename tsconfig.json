@@ -1,0 +1,1 @@
+{"compilerOptions":{"forceConsistentCasingInFileNames":true,"isolatedModules":true,"jsx":"react-jsx","lib":["ES2021","DOM","DOM.Iterable"],"module":"ESNext","moduleResolution":"bundler","noEmit":true,"skipLibCheck":true,"strict":true,"target":"ES2021"},"include":["src","vite.config.ts"]}

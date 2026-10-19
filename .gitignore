@@ -1,0 +1,13 @@
+# dependencies
+node_modules/
+# build output
+dist/
+# rust
+src-tauri/target/
+# sidecar binaries (fetched by scripts/fetch-sidecars.sh — large, per-OS)
+src-tauri/binaries/uruk-*
+# misc
+.DS_Store
+*.log
+qa/*.png
+!qa/.gitkeep
