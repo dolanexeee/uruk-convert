@@ -180,6 +180,74 @@ writeFileSync(
   "WEBVTT\n\nNOTE\nA comment block that must not become a cue\n\ncue-1\n02:03.500 --> 02:04.000 position:50% align:center\nShort time cue\n\n100:00:00.000 --> 100:00:01.500\nFar future cue\n",
 );
 
+// ---------------------------------------------------------------------------
+// Stage 4 fixtures: tools.
+// ---------------------------------------------------------------------------
+console.log("· generating stage-4 fixtures…");
+// Transparency fixture: red disc on a fully transparent canvas.
+must("convert", ["-size", "200x160", "xc:none", "-fill", "#d23c28", "-draw", "circle 100,80 100,40", join(FIX, "alpha.png")]);
+// Metadata fixture: a JPEG with a planted EXIF APP1 (Make/Model) spliced
+// in by python (ImageMagick's -set exif:* does not write EXIF into JPEG
+// on this build — the byte-level APP1 is the honest plant) plus an IM
+// comment. The strip test then proves both are really gone.
+must("convert", ["-size", "240x180", "plasma:fractal", "-quality", "92", join(FIX, "meta-base.jpg")]);
+must("convert", [join(FIX, "meta-base.jpg"), "-set", "comment", "PLANTED-COMMENT-42", join(FIX, "meta-commented.jpg")]);
+{
+  const py = [
+    "import struct, sys",
+    "def build_exif(make, model):",
+    "    entries, data = [], b''",
+    "    base = 8 + 2 + 2*12 + 4",
+    "    for tag, s in ((0x010F, make), (0x0110, model)):",
+    "        b = s.encode() + b'\\x00'",
+    "        if len(b) <= 4:",
+    "            entries.append((tag, 2, len(b), b.ljust(4, b'\\x00')))",
+    "        else:",
+    "            entries.append((tag, 2, len(b), struct.pack('<I', base + len(data))))",
+    "            data += b",
+    "    tiff = b'II*\\x00' + struct.pack('<I', 8)",
+    "    ifd = struct.pack('<H', len(entries))",
+    "    for tag, typ, cnt, val in sorted(entries):",
+    "        ifd += struct.pack('<HHI', tag, typ, cnt) + val",
+    "    ifd += struct.pack('<I', 0)",
+    "    payload = b'Exif\\x00\\x00' + tiff + ifd + data",
+    "    return b'\\xff\\xe1' + struct.pack('>H', len(payload) + 2) + payload",
+    "src = open(sys.argv[1], 'rb').read()",
+    "assert src[:2] == b'\\xff\\xd8'",
+    "open(sys.argv[2], 'wb').write(src[:2] + build_exif('UrukTestCam', 'Probe-9000') + src[2:])",
+  ].join("\n");
+  const script = join(WORK, "plant_exif.py");
+  writeFileSync(script, py);
+  must("python3", [script, join(FIX, "meta-commented.jpg"), join(FIX, "meta.jpg")]);
+}
+// Three-page PDF with one distinct marker per page (split/extract/
+// rotate/redact proofs): p1 SECRETREDACT, p2 KEEPTEXT, p3 THIRDPAGE.
+for (const [name, marker] of [["pg1", "SECRETREDACT"], ["pg2", "KEEPTEXT"], ["pg3", "THIRDPAGE"]]) {
+  writeFileSync(join(FIX, `${name}.txt`), `${marker} marker line on this page\n\nBody text follows the marker so the page is a real document page.\n`);
+  loBake("pdf", join(FIX, `${name}.txt`));
+}
+must("pdfunite", [join(FIX, "pg1.pdf"), join(FIX, "pg2.pdf"), join(FIX, "pg3.pdf"), join(FIX, "photo.pdf")]);
+// Heavy PDF for the compress proof: a big noisy image as the only page.
+must("convert", ["-size", "1600x1200", "plasma:fractal", join(FIX, "big.png")]);
+must("convert", [join(FIX, "big.png"), join(FIX, "big.pdf")]);
+
+function engineMetadata(path) {
+  const r = run(ENGINE, ["metadata", path]);
+  try {
+    return JSON.parse(r.stdout);
+  } catch {
+    return null;
+  }
+}
+function pdfWordBox(path, page, word) {
+  const out = must("pdftotext", ["-f", String(page), "-l", String(page), "-bbox", path, "-"]);
+  const m = out.match(new RegExp(`<word xMin="([\\d.]+)" yMin="([\\d.]+)" xMax="([\\d.]+)" yMax="([\\d.]+)">${word}</word>`));
+  if (!m) return null;
+  const [x1, y1, x2, y2] = m.slice(1).map(Number);
+  return { page, x: x1 - 2, y: y1 - 2, w: x2 - x1 + 4, h: y2 - y1 + 4 };
+}
+const tool = (input, t) => ({ kind: "tool", input, tool: t, suffix: "converted" });
+
 // Re-probe helpers for the zip-based office formats and PDFs.
 const PY_ZIP_TEXT = [
   "import sys, zipfile, re",
@@ -583,6 +651,204 @@ console.log("· subtitles (stage 2)");
     "vtt → txt (dialogue only, no NOTE)",
     vtt2txt.ok && readFileSync(vtt2txt.output, "utf8") === "Short time cue\nFar future cue\n",
     vtt2txt.error ?? "",
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log("· image tools (stage 4)");
+{
+  const png = join(FIX, "img.png"); // 320x240
+  const cropped = engineJob(tool(png, { tool: "image_crop", x: 10, y: 10, w: 100, h: 80 }));
+  check(
+    "tool crop 320x240 → 100x80",
+    cropped.ok && identifyArg(cropped.output, "%wx%h") === "100x80",
+    cropped.error ?? "",
+  );
+  const resized = engineJob(tool(png, { tool: "image_resize", w: 160 }));
+  check(
+    "tool resize w=160 keeps ratio (160x120)",
+    resized.ok && identifyArg(resized.output, "%wx%h") === "160x120",
+    resized.error ?? "",
+  );
+  const rotated = engineJob(tool(png, { tool: "image_transform", rotate: 90, flip_h: false, flip_v: false }));
+  check(
+    "tool transform rotate 90 swaps dims (240x320)",
+    rotated.ok && identifyArg(rotated.output, "%wx%h") === "240x320",
+    rotated.error ?? "",
+  );
+  const flipped = engineJob(tool(png, { tool: "image_transform", rotate: 0, flip_h: true, flip_v: true }));
+  check(
+    "tool transform flips keep dims (320x240)",
+    flipped.ok && identifyArg(flipped.output, "%wx%h") === "320x240",
+    flipped.error ?? "",
+  );
+  const alpha = join(FIX, "alpha.png");
+  check(
+    "fixture alpha.png really has transparency",
+    identifyArg(alpha, "%[opaque]").toLowerCase() === "false",
+    identifyArg(alpha, "%[opaque]"),
+  );
+  const bg = engineJob(tool(alpha, { tool: "image_background", color: "#FFFFFF" }));
+  check(
+    "tool add-background flattens transparency (opaque)",
+    bg.ok && identifyArg(bg.output, "%[opaque]").toLowerCase() === "true",
+    bg.error ?? identifyArg(bg.output ?? alpha, "%[opaque]"),
+  );
+  const annotated = engineJob(
+    tool(png, {
+      tool: "image_annotate",
+      shapes: [
+        { shape: "rect", x: 20, y: 20, w: 120, h: 70 },
+        { shape: "arrow", x1: 200, y1: 180, x2: 290, y2: 60 },
+        { shape: "text", x: 26, y: 130, text: "URUKNOTE", size: 30 },
+      ],
+    }),
+  );
+  check(
+    "tool annotate draws rect+arrow+text (output differs, same dims)",
+    annotated.ok &&
+      identifyArg(annotated.output, "%wx%h") === "320x240" &&
+      statSync(annotated.output).size !== statSync(png).size,
+    annotated.error ?? "",
+  );
+}
+
+console.log("· metadata view + strip (stage 4)");
+{
+  const meta = join(FIX, "meta.jpg");
+  const entries = engineMetadata(meta);
+  const asMap = new Map(entries ?? []);
+  check(
+    "metadata view reads planted EXIF Make/Model + comment",
+    asMap.get("exif:Make") === "UrukTestCam" &&
+      asMap.get("exif:Model") === "Probe-9000" &&
+      String(asMap.get("comment") ?? asMap.get("Comment") ?? "").includes("PLANTED-COMMENT-42"),
+    JSON.stringify(entries)?.slice(0, 200) ?? "no entries",
+  );
+  const stripped = engineJob(tool(meta, { tool: "image_strip_metadata" }));
+  const verbose = stripped.ok ? must("identify", ["-verbose", stripped.output]) : "";
+  check(
+    "tool strip removes planted EXIF + comment",
+    stripped.ok && !verbose.includes("exif:") && !verbose.includes("PLANTED-COMMENT-42"),
+    stripped.error ?? "planted metadata survived the strip",
+  );
+  const pdfMeta = engineMetadata(join(FIX, "photo.pdf"));
+  check(
+    "metadata view reads PDF info (Pages=3)",
+    (pdfMeta ?? []).some(([k, v]) => k === "Pages" && v === "3"),
+    JSON.stringify(pdfMeta)?.slice(0, 160) ?? "",
+  );
+  const mediaMeta = engineMetadata(join(FIX, "clip.mp4"));
+  check(
+    "metadata view reads media format + streams",
+    (mediaMeta ?? []).some(([k]) => k === "Format") && (mediaMeta ?? []).some(([k]) => k === "Video"),
+    JSON.stringify(mediaMeta)?.slice(0, 160) ?? "",
+  );
+}
+
+console.log("· trim (stage 4)");
+{
+  const probeDuration = (path) => {
+    const r = run(FFPROBE, ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path]);
+    return Number((r.stdout ?? "").trim()) || 0;
+  };
+  const clip = join(FIX, "clip.mp4"); // 1.5 s
+  const tail = engineJob(tool(clip, { tool: "media_trim", start: 0, end: 0.8 }));
+  const tailDur = tail.ok ? probeDuration(tail.output) : 0;
+  check(
+    "tool trim tail 0→0.8s (stream copy)",
+    tail.ok && tailDur > 0.45 && tailDur < 1.15,
+    tail.error ?? `duration=${tailDur}`,
+  );
+  const seek = engineJob(tool(clip, { tool: "media_trim", start: 0.5, end: 1.2 }));
+  const seekDur = seek.ok ? probeDuration(seek.output) : 0;
+  check(
+    "tool trim seek 0.5→1.2s (re-encode, accurate cut)",
+    seek.ok && seekDur > 0.4 && seekDur < 1.05,
+    seek.error ?? `duration=${seekDur}`,
+  );
+  const tone = join(FIX, "tone.wav"); // 1.0 s
+  const at = engineJob(tool(tone, { tool: "media_trim", start: 0.3, end: 0.9 }));
+  const atDur = at.ok ? probeDuration(at.output) : 0;
+  check(
+    "tool trim audio 0.3→0.9s",
+    at.ok && atDur > 0.35 && atDur < 0.9,
+    at.error ?? `duration=${atDur}`,
+  );
+}
+
+console.log("· pdf tools (stage 4)");
+{
+  const pdf = join(FIX, "photo.pdf"); // 3 pages: SECRETREDACT / KEEPTEXT / THIRDPAGE
+  check("fixture photo.pdf has 3 pages", pdfPagesOf(pdf) === 3, `pages=${pdfPagesOf(pdf)}`);
+
+  const split = engineJob(tool(pdf, { tool: "pdf_split", ranges: [[1, 2], [3, 3]] }));
+  const part2 = (split.output ?? "").replace("-p1-2.pdf", "-p3-3.pdf");
+  check(
+    "tool pdf split → p1-2 (2 pages) + p3-3 (1 page)",
+    split.ok &&
+      (split.output ?? "").endsWith("-p1-2.pdf") &&
+      pdfPagesOf(split.output) === 2 &&
+      existsSync(part2) &&
+      pdfPagesOf(part2) === 1,
+    split.error ?? split.output ?? "",
+  );
+
+  const extract = engineJob(tool(pdf, { tool: "pdf_extract", ranges: [[1, 1], [3, 3]] }));
+  const extractText = extract.ok ? pdfTextOf(extract.output) : "";
+  check(
+    "tool pdf extract pages 1+3 (2 pages, page 2 absent)",
+    extract.ok &&
+      pdfPagesOf(extract.output) === 2 &&
+      extractText.includes("SECRETREDACT") &&
+      extractText.includes("THIRDPAGE") &&
+      !extractText.includes("KEEPTEXT"),
+    extract.error ?? extractText.slice(0, 120),
+  );
+
+  const docPdf = join(FIX, "doc.pdf");
+  const docPages = pdfPagesOf(docPdf);
+  const merged = engineJob(tool(pdf, { tool: "pdf_merge", inputs: [pdf, docPdf] }));
+  check(
+    "tool pdf merge (3 + doc pages)",
+    merged.ok && pdfPagesOf(merged.output) === 3 + docPages,
+    merged.error ?? `pages=${merged.ok ? pdfPagesOf(merged.output) : "?"} want ${3 + docPages}`,
+  );
+
+  const rot = engineJob(tool(pdf, { tool: "pdf_rotate", angle: 90 }));
+  const rotInfo = rot.ok ? must("pdfinfo", ["-f", "1", "-l", "3", rot.output]) : "";
+  const rotCount = (rotInfo.match(/rot:\s+90/g) ?? []).length;
+  check(
+    "tool pdf rotate sets /Rotate 90 on all pages, text intact",
+    rot.ok && rotCount === 3 && pdfTextOf(rot.output).includes("KEEPTEXT"),
+    rot.error ?? rotInfo.slice(0, 160),
+  );
+
+  const big = join(FIX, "big.pdf");
+  const comp = engineJob(tool(big, { tool: "pdf_compress", tier: "screen" }));
+  check(
+    "tool pdf compress (screen tier) shrinks the heavy PDF",
+    comp.ok && statSync(comp.output).size < statSync(big).size * 0.8,
+    comp.error ?? `${statSync(big).size} → ${comp.ok ? statSync(comp.output).size : "?"}`,
+  );
+
+  const box = pdfWordBox(pdf, 1, "SECRETREDACT");
+  check("redact fixture: SECRETREDACT word box found on page 1", Boolean(box), "pdftotext -bbox");
+  const red = engineJob(tool(pdf, { tool: "pdf_redact", regions: [box] }));
+  const redText = red.ok ? pdfTextOf(red.output) : "";
+  check(
+    "tool pdf redact REMOVES the text (not paint-over)",
+    red.ok &&
+      !redText.includes("SECRETREDACT") &&
+      redText.includes("KEEPTEXT") &&
+      redText.includes("THIRDPAGE") &&
+      pdfPagesOf(red.output) === 3,
+    red.error ?? redText.slice(0, 160),
+  );
+  check(
+    "redact note discloses the image-rebuild of redacted pages",
+    (red.note ?? "").includes("rebuilt as 300-DPI images"),
+    red.note ?? "no note",
   );
 }
 

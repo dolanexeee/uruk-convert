@@ -177,9 +177,11 @@ pub fn render_wheel(model: &WheelModel, hover: Option<usize>) -> Pixmap {
         None,
     );
 
-    // Segments + labels.
+    // Segments + labels. Labels are host-composed (extensions for the
+    // conversion wheel, localized names for tools/actions); long labels
+    // shrink to fit their sector.
     let n = model.segments.len();
-    for (i, target) in model.segments.iter().enumerate() {
+    for (i, segment) in model.segments.iter().enumerate() {
         let is_hover = hover == Some(i);
         let path = sector_path(n, i, if is_hover { 10.0 } else { 0.0 });
         let fill = if is_hover {
@@ -205,13 +207,21 @@ pub fn render_wheel(model: &WheelModel, hover: Option<usize>) -> Pixmap {
         } else {
             (0.0, 0.0)
         };
-        let label = target.to_uppercase();
+        let label = &segment.label;
+        let label_chars = label.chars().count();
+        let size = if label_chars > 9 {
+            12.5
+        } else if label_chars > 6 {
+            14.0
+        } else {
+            16.5
+        };
         draw_centered(
             &mut pm,
-            &plain_glyphs(&label),
+            &display_order(label),
             lx + hx,
-            ly + hy + 16.5 * 0.35,
-            16.5,
+            ly + hy + size * 0.35,
+            size,
             true,
             SEG_INK,
         );

@@ -432,10 +432,12 @@ mod imp {
         parse_filenames_plist, PB_TYPE_FILENAMES, PB_TYPE_FILE_URL,
     };
     use crate::geom;
+    use crate::panel::{PanelAction, PanelEvent, PanelKey, PanelState};
     use crate::render::{pixmap_to_bgra, render_toast, render_wheel, TOAST_H};
     use crate::{
-        SensorCommand, SensorConfig, SensorError, SensorEvent, SensorLang, Toast, ToastKind,
-        WheelModel, WheelRequest, WheelResolver,
+        chord_for, HeldMods, PanelOutcome, PanelSpec, SensorCommand, SensorConfig, SensorError,
+        SensorEvent, SensorLang, Toast, ToastKind, WheelKind, WheelModel, WheelRequest,
+        WheelResolver, WheelSegment, ACTION_COPY_FILE, ACTION_COPY_PATH, ACTION_SHARE,
     };
 
     // -----------------------------------------------------------------
@@ -519,6 +521,12 @@ mod imp {
         fn CGEventGetFlags(event: *mut c_void) -> u64;
         fn CGEventGetLocation(event: *mut c_void) -> CGPoint;
         fn CGEventGetIntegerValueField(event: *mut c_void, field: u32) -> i64;
+        fn CGEventKeyboardGetUnicodeString(
+            event: *mut c_void,
+            max_len: i32,
+            actual_len: *mut i32,
+            buffer: *mut u16,
+        );
         fn CGMainDisplayID() -> u32;
         fn CGDisplayBounds(display: u32) -> CGRect;
         fn CGColorSpaceCreateDeviceRGB() -> *mut c_void;
@@ -766,6 +774,16 @@ mod imp {
         toast_image_view: usize,
         toast_shown_at: Option<Instant>,
         toast_size: (u32, u32),
+        // Stage 4: HUD panel (pre-created like the wheel/toast panels).
+        panel_panel: usize,
+        panel_image_view: usize,
+        panel_state: Option<PanelState>,
+        panel_preview: Option<tiny_skia::Pixmap>,
+        /// Panel frame in AppKit coords (origin bottom-left) + size.
+        panel_frame: (f64, f64, f64, f64),
+        panel_display_h: f64,
+        /// Retained NSSharingServicePicker while a share sheet is up.
+        share_picker: usize,
         // Drag session.
         button_down: bool,
         ignore_until_up: bool,
@@ -777,6 +795,10 @@ mod imp {
         classified: bool,
         drag_types: Vec<String>,
         modifier_down: bool,
+        /// Current summon chord (Stage 4: three wheels).
+        held_kind: Option<WheelKind>,
+        /// Kind the next resolve should ask the host for.
+        pending_kind: WheelKind,
         summon_pending: bool,
         summon_tried: bool,
         summoned: bool,
@@ -785,7 +807,7 @@ mod imp {
         model: Option<WheelModel>,
         paths: Vec<PathBuf>,
         hover: Option<usize>,
-        drop_result: Option<(Vec<PathBuf>, String)>,
+        drop_result: Option<(Vec<PathBuf>, WheelSegment)>,
         conclude_pending: bool,
         mouse_up_at: Option<Instant>,
         session_active: bool,
@@ -798,6 +820,8 @@ mod imp {
                 running: false,
                 config: SensorConfig {
                     modifier: crate::SummonModifier::Shift,
+                    tools_modifier: crate::SummonModifier::Alt,
+                    actions_modifier: crate::SummonModifier::Control,
                     lang: SensorLang::Ar,
                     enabled: true,
                 },
@@ -818,6 +842,13 @@ mod imp {
                 toast_image_view: 0,
                 toast_shown_at: None,
                 toast_size: (0, 0),
+                panel_panel: 0,
+                panel_image_view: 0,
+                panel_state: None,
+                panel_preview: None,
+                panel_frame: (0.0, 0.0, 0.0, 0.0),
+                panel_display_h: 0.0,
+                share_picker: 0,
                 button_down: false,
                 ignore_until_up: false,
                 down_pos: (0.0, 0.0),
@@ -828,6 +859,8 @@ mod imp {
                 classified: false,
                 drag_types: Vec::new(),
                 modifier_down: false,
+                held_kind: None,
+                pending_kind: WheelKind::Convert,
                 summon_pending: false,
                 summon_tried: false,
                 summoned: false,
@@ -895,6 +928,52 @@ mod imp {
         ShowToast(Toast, bool),
         HideToast,
         StopLoop,
+        // Stage 4.
+        ShowPanel(PanelSpec),
+        UpdatePanelCanvas {
+            id: String,
+            image_png: PathBuf,
+            page: u32,
+            pages: u32,
+        },
+        ClosePanel,
+        /// A sensor-executed file action (clipboard / share sheet).
+        NativeAction { paths: Vec<PathBuf>, action: String },
+    }
+
+    /// Route a completed wheel drop by wheel kind. Clipboard and share
+    /// actions are executed natively (AppKit) in the action phase;
+    /// everything else goes to the host as an event.
+    fn queue_drop(
+        s: &mut State,
+        paths: Vec<PathBuf>,
+        segment: WheelSegment,
+        actions: &mut Vec<Action>,
+    ) {
+        let kind = s
+            .model
+            .as_ref()
+            .map(|m| m.kind)
+            .unwrap_or(WheelKind::Convert);
+        let (x, y) = (s.last_pos.0 as i32, s.last_pos.1 as i32);
+        match kind {
+            WheelKind::Convert => {
+                emit(s, SensorEvent::ConvertRequested { paths, target: segment.id });
+            }
+            WheelKind::Tools => {
+                emit(s, SensorEvent::ToolRequested { paths, tool: segment.id, x, y });
+            }
+            WheelKind::Actions => {
+                if segment.id == ACTION_COPY_FILE
+                    || segment.id == ACTION_COPY_PATH
+                    || segment.id == ACTION_SHARE
+                {
+                    actions.push(Action::NativeAction { paths, action: segment.id });
+                } else {
+                    emit(s, SensorEvent::ActionRequested { paths, action: segment.id, x, y });
+                }
+            }
+        }
     }
 
     // -----------------------------------------------------------------
@@ -1503,6 +1582,301 @@ mod imp {
     }
 
     /// Near-empty by design: record raw state, let `tick` do the work.
+    // -----------------------------------------------------------------
+    // Stage 4: HUD panel host. Input arrives through the event tap
+    // (the panel is key so the source app never sees the keystrokes;
+    // the tap still observes them and feeds the shared PanelState).
+    // -----------------------------------------------------------------
+
+    fn panel_is_open() -> bool {
+        with_state(|s| s.panel_state.is_some())
+    }
+
+    /// Convert a CG location (top-left origin) into panel pixel
+    /// coords (top-left origin), using the stored AppKit frame.
+    fn panel_point(s: &State, loc: CGPoint) -> (f32, f32) {
+        let (fx, fy, _fw, fh) = s.panel_frame;
+        let px = loc.x - fx;
+        let from_bottom = (s.panel_display_h - loc.y) - fy;
+        let py = fh - from_bottom;
+        (px as f32, py as f32)
+    }
+
+    fn panel_apply_action(action: PanelAction) {
+        match action {
+            PanelAction::None => {}
+            PanelAction::Redraw => unsafe { repaint_panel() },
+            PanelAction::NeedPage(page) => {
+                with_state(|s| {
+                    let id = s.panel_state.as_ref().map(|st| st.spec.id.clone());
+                    if let Some(id) = id {
+                        emit(s, SensorEvent::PanelPageRequest { id, page });
+                    }
+                });
+            }
+            PanelAction::Apply | PanelAction::Cancel => {
+                let apply = matches!(action, PanelAction::Apply);
+                let taken = with_state(|s| {
+                    let st = s.panel_state.take()?;
+                    s.panel_preview = None;
+                    let outcome = if apply {
+                        st.outcome()
+                    } else {
+                        PanelOutcome::Cancelled
+                    };
+                    Some((st.spec.id.clone(), outcome))
+                });
+                unsafe {
+                    let panel = with_state(|s| s.panel_panel);
+                    if panel != 0 {
+                        send0_void(panel as Id, sel("orderOut:"));
+                    }
+                }
+                if let Some((id, outcome)) = taken {
+                    with_state(|s| emit(s, SensorEvent::PanelClosed { id, outcome }));
+                }
+            }
+        }
+    }
+
+    fn panel_feed_mouse(typ: u32, loc: CGPoint) {
+        let action = with_state(|s| {
+            let (x, y) = panel_point(s, loc);
+            let st = s.panel_state.as_mut()?;
+            let ev = match typ {
+                t if t == EV_LEFT_MOUSE_DOWN => PanelEvent::Down { x, y },
+                t if t == EV_LEFT_MOUSE_UP => PanelEvent::Up { x, y },
+                _ => PanelEvent::Move { x, y },
+            };
+            Some(st.handle(ev))
+        });
+        if let Some(a) = action {
+            panel_apply_action(a);
+        }
+    }
+
+    fn panel_feed_key(event: *mut c_void, code: i64) {
+        let key = match code {
+            53 => PanelKey::Escape,
+            36 | 76 => PanelKey::Enter,
+            48 => PanelKey::Tab,
+            51 => PanelKey::Backspace,
+            117 => PanelKey::Delete,
+            123 => PanelKey::Left,
+            124 => PanelKey::Right,
+            115 => PanelKey::Home,
+            119 => PanelKey::End,
+            _ => {
+                let mut buf = [0u16; 4];
+                let mut len: i32 = 0;
+                unsafe {
+                    CGEventKeyboardGetUnicodeString(event, 4, &mut len, buf.as_mut_ptr());
+                }
+                if len > 0 {
+                    match char::from_u32(buf[0] as u32) {
+                        Some(c) if !c.is_control() => PanelKey::Char(c),
+                        _ => return,
+                    }
+                } else {
+                    return;
+                }
+            }
+        };
+        let action = with_state(|s| {
+            let st = s.panel_state.as_mut()?;
+            Some(st.handle(PanelEvent::Key(key)))
+        });
+        if let Some(a) = action {
+            panel_apply_action(a);
+        }
+    }
+
+    /// Show the HUD panel for `spec`: size + anchor it, paint the
+    /// shared render, order it front as key window.
+    fn show_panel_native(spec: PanelSpec) {
+        let st = PanelState::new(spec);
+        let preview = st
+            .spec
+            .canvas
+            .as_ref()
+            .and_then(|cv| std::fs::read(&cv.image_png).ok())
+            .and_then(|b| crate::panel::decode_png(&b));
+        let bounds = unsafe { main_display_bounds() };
+        let (dw, dh) = (bounds.size.width, bounds.size.height);
+        let (fw, fh) = (st.layout.width as f64, st.layout.height as f64);
+        let anchor = st.spec.anchor;
+        let mut x = (anchor.0 as f64 - 40.0).max(8.0);
+        if x + fw > dw - 8.0 {
+            x = (dw - 8.0 - fw).max(8.0);
+        }
+        let mut top = anchor.1 as f64 + 18.0;
+        if top + fh > dh - 8.0 {
+            top = (dh - 8.0 - fh).max(8.0);
+        }
+        let fy = dh - (top + fh);
+        let pm = crate::panel::render_panel(&st, preview.as_ref());
+        with_state(|s| {
+            s.panel_state = Some(st);
+            s.panel_preview = preview;
+            s.panel_frame = (x, fy, fw, fh);
+            s.panel_display_h = dh;
+        });
+        unsafe {
+            let (panel, iv) = with_state(|s| (s.panel_panel, s.panel_image_view));
+            if panel == 0 || iv == 0 {
+                return;
+            }
+            send_rect_void(
+                iv as Id,
+                sel("setFrame:"),
+                NSRect {
+                    origin: NSPoint { x: 0.0, y: 0.0 },
+                    size: NSSize { width: fw, height: fh },
+                },
+            );
+            set_image_view(iv, &pm);
+            send_rect_bool_void(
+                panel as Id,
+                sel("setFrame:display:"),
+                NSRect {
+                    origin: NSPoint { x, y: fy },
+                    size: NSSize { width: fw, height: fh },
+                },
+                true,
+            );
+            send_id_void(
+                panel as Id,
+                sel("makeKeyAndOrderFront:"),
+                std::ptr::null_mut(),
+            );
+        }
+    }
+
+    /// Repaint the open panel from its current state.
+    unsafe fn repaint_panel() {
+        let rendered = with_state(|s| {
+            let st = s.panel_state.as_ref()?;
+            let pm = crate::panel::render_panel(st, s.panel_preview.as_ref());
+            Some((pm, s.panel_image_view))
+        });
+        if let Some((pm, iv)) = rendered {
+            if iv != 0 {
+                set_image_view(iv, &pm);
+            }
+        }
+    }
+
+    /// Execute a sensor-native file action (clipboard / share).
+    unsafe fn run_native_action(paths: &[PathBuf], action: &str) {
+        match action {
+            ACTION_COPY_PATH => {
+                let text = paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                set_clipboard_text(&text);
+            }
+            ACTION_COPY_FILE => set_clipboard_files(paths, false),
+            ACTION_SHARE => show_share_picker(paths),
+            _ => {}
+        }
+    }
+
+    unsafe fn general_pasteboard() -> Id {
+        let cls = get_class("NSPasteboard");
+        if cls.is_null() {
+            return std::ptr::null_mut();
+        }
+        send0(cls, sel("generalPasteboard"))
+    }
+
+    unsafe fn set_clipboard_text(text: &str) {
+        let pb = general_pasteboard();
+        if pb.is_null() {
+            return;
+        }
+        let _ = send0_usize(pb, sel("clearContents"));
+        let value = ns_string(text);
+        let ty = ns_string("public.utf8-plain-text");
+        if !value.is_null() && !ty.is_null() {
+            let _ = send_id_id(pb, sel("setString:forType:"), value, ty);
+        }
+    }
+
+    unsafe fn url_array(paths: &[PathBuf]) -> Id {
+        let arr_cls = get_class("NSMutableArray");
+        if arr_cls.is_null() {
+            return std::ptr::null_mut();
+        }
+        let arr = send0(arr_cls, sel("array"));
+        let url_cls = get_class("NSURL");
+        for p in paths {
+            let s = ns_string(&p.display().to_string());
+            if s.is_null() || url_cls.is_null() {
+                continue;
+            }
+            let url = send_id(url_cls, sel("fileURLWithPath:"), s);
+            if !url.is_null() {
+                send_id_void(arr, sel("addObject:"), url);
+            }
+        }
+        arr
+    }
+
+    unsafe fn set_clipboard_files(paths: &[PathBuf], _unused: bool) {
+        let pb = general_pasteboard();
+        if pb.is_null() {
+            return;
+        }
+        let _ = send0_usize(pb, sel("clearContents"));
+        let arr = url_array(paths);
+        if !arr.is_null() {
+            let _ = send_id(pb, sel("writeObjects:"), arr);
+        }
+    }
+
+    unsafe fn show_share_picker(paths: &[PathBuf]) {
+        let cls = get_class("NSSharingServicePicker");
+        if cls.is_null() {
+            return;
+        }
+        let items = url_array(paths);
+        if items.is_null() {
+            return;
+        }
+        let alloc = send0(cls, sel("alloc"));
+        let picker = send_id(alloc, sel("initWithItems:"), items);
+        if picker.is_null() {
+            return;
+        }
+        // Anchor on the wheel panel's content view at a zero rect.
+        let view = with_state(|s| unsafe {
+            if s.wheel_panel != 0 {
+                send0(s.wheel_panel as Id, sel("contentView")) as usize
+            } else {
+                0
+            }
+        });
+        if view != 0 {
+            let f: unsafe extern "C" fn(Id, Sel, NSRect, Id, usize) =
+                std::mem::transmute(msgsend_addr());
+            f(
+                picker,
+                sel("showRelativeToRect:ofView:preferredEdge:"),
+                NSRect::default(),
+                view as Id,
+                0,
+            );
+        }
+        with_state(|s| {
+            if s.share_picker != 0 {
+                send0_void(s.share_picker as Id, sel("release"));
+            }
+            s.share_picker = picker as usize;
+        });
+    }
+
     extern "C" fn tap_callback(
         _proxy: *mut c_void,
         typ: u32,
@@ -1518,6 +1892,10 @@ mod imp {
             }
             EV_LEFT_MOUSE_DOWN => {
                 let loc = unsafe { CGEventGetLocation(event) };
+                if panel_is_open() {
+                    panel_feed_mouse(typ, loc);
+                    return event;
+                }
                 with_state(|s| {
                     // A fresh press restarts the session bookkeeping; a
                     // previously summoned wheel is stale — tick hides it
@@ -1530,6 +1908,10 @@ mod imp {
             }
             EV_LEFT_MOUSE_DRAGGED => {
                 let loc = unsafe { CGEventGetLocation(event) };
+                if panel_is_open() {
+                    panel_feed_mouse(typ, loc);
+                    return event;
+                }
                 let flags = unsafe { CGEventGetFlags(event) };
                 with_state(|s| {
                     if s.ignore_until_up || !s.button_down {
@@ -1556,6 +1938,10 @@ mod imp {
             }
             EV_KEY_DOWN => {
                 let code = unsafe { CGEventGetIntegerValueField(event, FIELD_KEYCODE) };
+                if panel_is_open() {
+                    panel_feed_key(event, code);
+                    return event;
+                }
                 if is_escape_keycode(code) {
                     with_state(|s| {
                         if s.summoned {
@@ -1565,6 +1951,10 @@ mod imp {
                 }
             }
             EV_LEFT_MOUSE_UP => {
+                let loc = unsafe { CGEventGetLocation(event) };
+                if panel_is_open() {
+                    panel_feed_mouse(typ, loc);
+                }
                 with_state(|s| {
                     s.button_down = false;
                     if s.mouse_up_at.is_none() {
@@ -1577,20 +1967,42 @@ mod imp {
         event
     }
 
-    /// Track the configured modifier's state; a rising edge during a
-    /// live drag asks `tick` to summon.
+    /// Track the held-modifier chord (Stage 4: three wheels, one
+    /// shared rule in `crate::chord_for`). A chord appearing mid-drag
+    /// asks `tick` to summon; a chord CHANGING under a live wheel
+    /// swaps the wheel for the new kind.
     fn note_modifier(s: &mut State, flags: u64) {
-        let now = modifier_is_down(flags, s.config.modifier);
-        if now && !s.modifier_down {
-            if s.candidate && !s.summoned && !s.suppress && s.config.enabled {
-                s.summon_pending = true;
+        let held = HeldMods {
+            shift: modifier_is_down(flags, crate::SummonModifier::Shift),
+            control: modifier_is_down(flags, crate::SummonModifier::Control),
+            alt: modifier_is_down(flags, crate::SummonModifier::Alt),
+        };
+        let kind = chord_for(held, &s.config);
+        if let Some(k) = kind {
+            s.pending_kind = k;
+        }
+        if kind != s.held_kind {
+            s.held_kind = kind;
+            match kind {
+                Some(k) => {
+                    if s.panel_state.is_none() {
+                        if s.summoned && s.model.as_ref().map(|m| m.kind) != Some(k) {
+                            s.summoned = false;
+                            s.model = None;
+                            s.summon_pending = true;
+                            s.summon_tried = false;
+                        } else if s.candidate && !s.summoned && !s.suppress && s.config.enabled {
+                            s.summon_pending = true;
+                        }
+                    }
+                }
+                None => {
+                    // A fresh tap is a fresh summon attempt.
+                    s.summon_tried = false;
+                }
             }
         }
-        if !now {
-            // A fresh tap is a fresh summon attempt.
-            s.summon_tried = false;
-        }
-        s.modifier_down = now;
+        s.modifier_down = kind.is_some();
     }
 
     // -----------------------------------------------------------------
@@ -1637,6 +2049,27 @@ mod imp {
                         let rtl = s.config.lang.is_rtl();
                         actions.push(Action::ShowToast(toast, rtl));
                     }
+                    SensorCommand::ShowPanel(spec) => {
+                        // Replacing an open panel closes it as Cancelled.
+                        if let Some(old) = s.panel_state.take() {
+                            emit(
+                                s,
+                                SensorEvent::PanelClosed {
+                                    id: old.spec.id.clone(),
+                                    outcome: PanelOutcome::Cancelled,
+                                },
+                            );
+                        }
+                        actions.push(Action::ShowPanel(spec));
+                    }
+                    SensorCommand::UpdatePanelCanvas { id, image_png, page, pages } => {
+                        actions.push(Action::UpdatePanelCanvas { id, image_png, page, pages });
+                    }
+                    SensorCommand::ClosePanel { .. } => {
+                        s.panel_state = None;
+                        s.panel_preview = None;
+                        actions.push(Action::ClosePanel);
+                    }
                 }
             }
 
@@ -1678,9 +2111,9 @@ mod imp {
             // --- drop concluded on the wheel ------------------------
             if s.conclude_pending {
                 s.conclude_pending = false;
-                if let Some((paths, target)) = s.drop_result.take() {
+                if let Some((paths, segment)) = s.drop_result.take() {
                     actions.push(Action::HideWheel);
-                    emit(s, SensorEvent::ConvertRequested { paths, target });
+                    queue_drop(s, paths, segment, &mut actions);
                 } else if s.summoned {
                     actions.push(Action::HideWheel);
                     if s.session_active {
@@ -1716,7 +2149,12 @@ mod imp {
             if s.summon_pending {
                 s.summon_pending = false;
                 s.summon_tried = true;
-                if s.classified && !s.summoned && !s.suppress && s.config.enabled {
+                if s.classified
+                    && !s.summoned
+                    && !s.suppress
+                    && s.config.enabled
+                    && s.panel_state.is_none()
+                {
                     let req_paths = s.paths.clone();
                     let req_types = s.drag_types.clone();
                     let pos = s.last_pos;
@@ -1740,8 +2178,8 @@ mod imp {
                         actions.push(Action::HideWheel);
                     }
                     match drop {
-                        Some((paths, target)) => {
-                            emit(s, SensorEvent::ConvertRequested { paths, target });
+                        Some((paths, segment)) => {
+                            queue_drop(s, paths, segment, &mut actions);
                         }
                         None => {
                             if had_session {
@@ -1763,6 +2201,49 @@ mod imp {
                         unsafe { CFRunLoopStop(rl as *mut c_void) };
                     }
                 }
+                Action::ShowPanel(spec) => {
+                    show_panel_native(spec);
+                }
+                Action::UpdatePanelCanvas { id, image_png, page, pages } => unsafe {
+                    let decoded = std::fs::read(&image_png)
+                        .ok()
+                        .and_then(|b| crate::panel::decode_png(&b));
+                    let mut need_render = false;
+                    with_state(|s| {
+                        if s.panel_state.as_ref().map(|st| st.spec.id.as_str())
+                            == Some(id.as_str())
+                        {
+                            if let Some(pm) = decoded {
+                                s.panel_preview = Some(pm);
+                            }
+                            if let Some(st) = s.panel_state.as_mut() {
+                                st.set_canvas_page(page, pages);
+                                need_render = true;
+                            }
+                        }
+                    });
+                    if need_render {
+                        repaint_panel();
+                    }
+                },
+                Action::ClosePanel => unsafe {
+                    let panel = with_state(|s| s.panel_panel);
+                    if panel != 0 {
+                        send0_void(panel as Id, sel("orderOut:"));
+                    }
+                },
+                Action::NativeAction { paths, action } => unsafe {
+                    run_native_action(&paths, &action);
+                    with_state(|s| {
+                        emit(
+                            s,
+                            SensorEvent::ActionDone {
+                                paths: paths.clone(),
+                                action: action.clone(),
+                            },
+                        );
+                    });
+                },
                 Action::CreateTap => unsafe {
                     if AXIsProcessTrusted() {
                         try_create_tap();
@@ -1800,7 +2281,12 @@ mod imp {
             // tick's fallback; if a rising edge arrived while
             // classification was pending, summon right away.
             let summon_now = with_state(|s| {
-                s.classified && s.summon_pending && !s.summoned && !s.suppress && s.config.enabled
+                s.classified
+                    && s.summon_pending
+                    && !s.summoned
+                    && !s.suppress
+                    && s.config.enabled
+                    && s.panel_state.is_none()
             });
             if summon_now {
                 with_state(|s| {
@@ -1849,8 +2335,10 @@ mod imp {
             paths_hint
         };
         let resolve = with_state(|s| s.resolve.clone());
+        let kind = with_state(|s| s.pending_kind);
         let model = resolve.and_then(|r| {
             r(&WheelRequest {
+                kind,
                 paths: paths.clone(),
                 mime_types,
             })
@@ -1958,6 +2446,15 @@ mod imp {
             }
             let toast_panel = make_panel(320.0, TOAST_H as f64, toast_view);
 
+            // Stage 4 HUD panel (created at max form size; resized and
+            // re-framed per panel on show).
+            let hud_view = make_plain_view(560.0, 760.0);
+            let hud_image = make_image_view(560.0, 760.0);
+            if !hud_view.is_null() && !hud_image.is_null() {
+                send_id_void(hud_view, sel("addSubview:"), hud_image);
+            }
+            let hud_panel = make_panel(560.0, 760.0, hud_view);
+
             let run_loop = CFRunLoopGetCurrent();
             with_state(|s| {
                 s.config = config;
@@ -1969,6 +2466,8 @@ mod imp {
                 s.wheel_image_view = wheel_image as usize;
                 s.toast_panel = toast_panel as usize;
                 s.toast_image_view = toast_image as usize;
+                s.panel_panel = hud_panel as usize;
+                s.panel_image_view = hud_image as usize;
             });
 
             // --- main-thread notice (panels want the main thread) ----

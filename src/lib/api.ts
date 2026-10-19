@@ -177,6 +177,8 @@ export function openPath(path: string): void {
 export interface AgentSettings {
   lang: string;
   modifier: string; // "shift" | "control" | "alt"
+  tools_modifier: string; // extra key with `modifier` → tools wheel
+  actions_modifier: string; // key alone → actions wheel
   autostart: boolean;
   sensing: boolean;
   onboarding_done: boolean;
@@ -188,6 +190,8 @@ export interface AgentSettings {
 export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
   lang: "ar",
   modifier: "shift",
+  tools_modifier: "alt",
+  actions_modifier: "control",
   autostart: false,
   sensing: true,
   onboarding_done: false,

@@ -43,9 +43,11 @@ use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 
 use crate::geom;
+use crate::panel::{PanelAction, PanelEvent, PanelKey, PanelState};
 use crate::{
-    DragSensor, SensorCommand, SensorConfig, SensorError, SensorEvent, SummonModifier, Toast,
-    ToastKind, WheelModel, WheelRequest, WheelResolver,
+    chord_for, paths_to_uri_list, DragSensor, HeldMods, PanelOutcome, PanelSpec, SensorCommand,
+    SensorConfig, SensorError, SensorEvent, SummonModifier, Toast, ToastKind, WheelKind,
+    WheelModel, WheelRequest, WheelResolver, ACTION_COPY_FILE, ACTION_COPY_PATH,
 };
 
 const XA_ATOM: u32 = 4;
@@ -137,6 +139,10 @@ struct Atoms {
     wm_class: u32,
     utf8_string: u32,
     string_atom: u32,
+    clipboard: u32,
+    targets_atom: u32,
+    gnome_copied_files: u32,
+    text_plain_utf8: u32,
 }
 
 fn intern_atoms(conn: &RustConnection) -> Result<Atoms, SensorError> {
@@ -164,6 +170,10 @@ fn intern_atoms(conn: &RustConnection) -> Result<Atoms, SensorError> {
         wm_class: get("WM_CLASS")?,
         utf8_string: get("UTF8_STRING")?,
         string_atom: get("STRING")?,
+        clipboard: get("CLIPBOARD")?,
+        targets_atom: get("TARGETS")?,
+        gnome_copied_files: get("x-special/gnome-copied-files")?,
+        text_plain_utf8: get("text/plain;charset=utf-8")?,
     })
 }
 
@@ -249,19 +259,14 @@ fn keycodes_for_keysyms(
     Ok(out)
 }
 
+/// query_pointer state-mask bit for a modifier (Shift=1<<0,
+/// Control=1<<2, Mod1/Alt=1<<3) — used by panel key translation.
+#[allow(dead_code)]
 fn modifier_mask_bit(m: SummonModifier) -> u16 {
     match m {
         SummonModifier::Shift => 1 << 0,
         SummonModifier::Control => 1 << 2,
         SummonModifier::Alt => 1 << 3, // Mod1
-    }
-}
-
-fn modifier_keysyms(m: SummonModifier) -> &'static [u32] {
-    match m {
-        SummonModifier::Shift => &[0xFFE1, 0xFFE2],
-        SummonModifier::Control => &[0xFFE3, 0xFFE4],
-        SummonModifier::Alt => &[0xFFE9, 0xFFEA, 0xFF7E],
     }
 }
 
@@ -304,6 +309,7 @@ struct Overlay {
     win: u32,
     x: i16,
     y: i16,
+    kind: WheelKind,
     model: Option<WheelModel>,
     paths: Vec<PathBuf>,
     hover: Option<usize>,
@@ -311,6 +317,20 @@ struct Overlay {
     last_pos: Option<(i16, i16)>,
     painted: bool,
     drop_handled: bool,
+}
+
+/// An open HUD panel window (Stage 4).
+struct PanelWin {
+    win: u32,
+    state: PanelState,
+    preview: Option<tiny_skia::Pixmap>,
+}
+
+/// Clipboard payload we currently own (copy-file / copy-path actions).
+struct ClipboardData {
+    paths: Vec<PathBuf>,
+    /// true: offer file payloads (uri-list); false: plain text only.
+    as_files: bool,
 }
 
 struct ToastWin {
@@ -395,7 +415,10 @@ struct Run {
     peek_due: Option<Instant>,
     peek_pending_gen: Option<u64>,
     peeked_paths: Vec<PathBuf>,
-    mod_held: bool,
+    /// Modifier set physically held (polled from the pointer mask).
+    held: HeldMods,
+    /// The chord the held set currently resolves to, if any.
+    active_chord: Option<WheelKind>,
     t_mod: Option<Instant>,
     suppress_summon: bool,
     overlay: Option<Overlay>,
@@ -403,6 +426,8 @@ struct Run {
     drag_ended_sent: bool,
     toast: Option<ToastWin>,
     capture_done: bool,
+    panel: Option<PanelWin>,
+    clipboard: Option<ClipboardData>,
 }
 
 impl Run {
@@ -490,7 +515,12 @@ impl Run {
         {
             let warm_start = Instant::now();
             let dummy = WheelModel {
-                segments: vec!["jpg".into(), "png".into(), "webp".into()],
+                kind: WheelKind::Convert,
+                segments: vec![
+                    crate::WheelSegment::new("jpg", "JPG"),
+                    crate::WheelSegment::new("png", "PNG"),
+                    crate::WheelSegment::new("webp", "WEBP"),
+                ],
                 hub_ext: "PNG".into(),
                 hub_title: "warmup.png".into(),
                 file_count: 1,
@@ -531,7 +561,8 @@ impl Run {
             peek_due: None,
             peek_pending_gen: None,
             peeked_paths: Vec::new(),
-            mod_held: false,
+            held: HeldMods::default(),
+            active_chord: None,
             t_mod: None,
             suppress_summon: false,
             overlay: None,
@@ -539,6 +570,8 @@ impl Run {
             drag_ended_sent: false,
             toast: None,
             capture_done: false,
+            panel: None,
+            clipboard: None,
         })
     }
 
@@ -556,6 +589,7 @@ impl Run {
             // 2. Host commands.
             if self.drain_commands() {
                 self.dismiss_overlay("shutdown");
+                self.close_panel(false);
                 self.dismiss_toast();
                 return Ok(());
             }
@@ -600,6 +634,11 @@ impl Run {
             match self.commands.try_recv() {
                 Ok(SensorCommand::Shutdown) => return true,
                 Ok(SensorCommand::ShowToast(t)) => self.show_toast(t),
+                Ok(SensorCommand::ShowPanel(spec)) => self.show_panel(spec),
+                Ok(SensorCommand::UpdatePanelCanvas { id, image_png, page, pages }) => {
+                    self.update_panel_canvas(&id, &image_png, page, pages)
+                }
+                Ok(SensorCommand::ClosePanel { .. }) => self.close_panel(false),
                 Ok(SensorCommand::UpdateConfig(c)) => {
                     self.config = c;
                     if !self.config.enabled {
@@ -637,11 +676,52 @@ impl Run {
             Event::SelectionNotify(sn) => {
                 self.handle_selection_notify(sn);
             }
+            Event::SelectionRequest(req) => {
+                self.handle_selection_request(req);
+            }
+            Event::SelectionClear(sc) => {
+                if sc.selection == self.atoms.clipboard {
+                    self.clipboard = None;
+                }
+            }
             Event::Expose(ex) => {
                 if self.overlay.as_ref().map(|o| o.win) == Some(ex.window) {
                     self.paint_overlay();
                 } else if self.toast.as_ref().map(|t| t.win) == Some(ex.window) {
                     self.paint_toast();
+                } else if self.panel.as_ref().map(|p| p.win) == Some(ex.window) {
+                    self.paint_panel();
+                }
+            }
+            Event::ButtonPress(bp) => {
+                if self.panel.as_ref().map(|p| p.win) == Some(bp.event) && bp.detail == 1 {
+                    self.panel_event(PanelEvent::Down {
+                        x: bp.event_x as f32,
+                        y: bp.event_y as f32,
+                    });
+                }
+            }
+            Event::ButtonRelease(br) => {
+                if self.panel.as_ref().map(|p| p.win) == Some(br.event) && br.detail == 1 {
+                    self.panel_event(PanelEvent::Up {
+                        x: br.event_x as f32,
+                        y: br.event_y as f32,
+                    });
+                }
+            }
+            Event::MotionNotify(mn) => {
+                if self.panel.as_ref().map(|p| p.win) == Some(mn.event) {
+                    self.panel_event(PanelEvent::Move {
+                        x: mn.event_x as f32,
+                        y: mn.event_y as f32,
+                    });
+                }
+            }
+            Event::KeyPress(kp) => {
+                if self.panel.as_ref().map(|p| p.win) == Some(kp.event) {
+                    if let Some(key) = self.panel_key_for(kp.detail, u16::from(kp.state)) {
+                        self.panel_event(PanelEvent::Key(key));
+                    }
                 }
             }
             _ => {}
@@ -687,15 +767,52 @@ impl Run {
                 self.candidate = true;
             }
         }
-        // Modifier edge (configured key) from the mask.
-        let bit = modifier_mask_bit(self.config.modifier);
-        let held = mask & bit != 0;
-        if held && !self.mod_held {
-            self.mod_held = true;
-            self.t_mod = Some(Instant::now());
-            self.try_summon();
-        } else if !held && self.mod_held {
-            self.mod_held = false;
+        // Modifier chords from the mask (Stage 4: three wheels).
+        // Shift = 1<<0, Control = 1<<2, Mod1/Alt = 1<<3 in the
+        // query_pointer state mask.
+        let new_held = HeldMods {
+            shift: mask & (1 << 0) != 0,
+            control: mask & (1 << 2) != 0,
+            alt: mask & (1 << 3) != 0,
+        };
+        if new_held != self.held {
+            self.held = new_held;
+            let new_chord = if self.config.enabled {
+                chord_for(new_held, &self.config)
+            } else {
+                None
+            };
+            if new_chord != self.active_chord {
+                self.active_chord = new_chord;
+                if new_chord.is_some() {
+                    self.t_mod = Some(Instant::now());
+                }
+                // A panel is modal for the agent: chords do nothing
+                // while one is open.
+                if self.panel.is_none() {
+                    match (self.overlay.as_ref().map(|o| o.kind), new_chord) {
+                        // Chord changed under a live wheel: swap wheels.
+                        (Some(cur), Some(next)) if cur != next => {
+                            self.dismiss_overlay("chord-change");
+                            self.try_summon(next);
+                        }
+                        (None, Some(kind)) => self.try_summon(kind),
+                        _ => {}
+                    }
+                }
+            }
+        } else if self.overlay.is_none()
+            && self.panel.is_none()
+            && !self.suppress_summon
+            && self.config.enabled
+        {
+            // The chord was already held when the drag confirmed
+            // (modifier-first gesture): summon once a drag exists.
+            if let Some(kind) = self.active_chord {
+                if self.xdnd_owner.is_some() || self.candidate {
+                    self.try_summon(kind);
+                }
+            }
         }
     }
 
@@ -787,7 +904,9 @@ impl Run {
             .map(|o| o.model.is_none())
             .unwrap_or(false);
         if needs_model {
+            let kind = self.overlay.as_ref().map(|o| o.kind).unwrap_or(WheelKind::Convert);
             if let Some(model) = (self.resolve)(&WheelRequest {
+                kind,
                 paths: self.peeked_paths.clone(),
                 mime_types: self.types.clone(),
             }) {
@@ -806,7 +925,7 @@ impl Run {
 
     // -- summon + overlay ------------------------------------------------------
 
-    fn try_summon(&mut self) {
+    fn try_summon(&mut self, kind: WheelKind) {
         if !self.config.enabled || self.suppress_summon || self.overlay.is_some() {
             return;
         }
@@ -823,24 +942,25 @@ impl Run {
             self.run_peek();
         }
         let model = (self.resolve)(&WheelRequest {
+            kind,
             paths: self.peeked_paths.clone(),
             mime_types: self.types.clone(),
         });
         match model {
-            Some(m) => self.summon_overlay(Some(m), self.peeked_paths.clone()),
+            Some(m) => self.summon_overlay(Some(m), self.peeked_paths.clone(), kind),
             None => {
                 // File drag (uri-list) but the host could not resolve a
                 // model yet (paths unknown): participate anyway — the
                 // drop/enter payload will let us resolve before painting
                 // segments. Only when it really is a file drag.
                 if types_are_file_drag(&self.types) {
-                    self.summon_overlay(None, Vec::new());
+                    self.summon_overlay(None, Vec::new(), kind);
                 }
             }
         }
     }
 
-    fn summon_overlay(&mut self, model: Option<WheelModel>, paths: Vec<PathBuf>) {
+    fn summon_overlay(&mut self, model: Option<WheelModel>, paths: Vec<PathBuf>, kind: WheelKind) {
         let t_edge = self.t_mod;
         let win = match self.conn.generate_id() {
             Ok(w) => w,
@@ -921,6 +1041,7 @@ impl Run {
             win,
             x: ox,
             y: oy,
+            kind,
             model,
             paths,
             hover: None,
@@ -943,6 +1064,7 @@ impl Run {
             None => return,
         };
         let model = model.unwrap_or(WheelModel {
+            kind: self.overlay.as_ref().map(|o| o.kind).unwrap_or(WheelKind::Convert),
             segments: Vec::new(),
             hub_ext: "…".into(),
             hub_title: String::new(),
@@ -1157,12 +1279,11 @@ impl Run {
                 (py - (ov.y + (WHEEL_PX / 2) as i16)) as f32,
             )
         });
-        let model_needed = ov.model.is_none() && seg.is_none();
-        let (accepted, target) = match (ov.model.as_ref(), seg) {
-            (Some(m), Some(i)) => (true, Some(m.segments[i].clone())),
-            _ => (false, None),
+        let segment = match (ov.model.as_ref(), seg) {
+            (Some(m), Some(i)) => m.segments.get(i).cloned(),
+            _ => None,
         };
-        let _ = model_needed;
+        let accepted = segment.is_some();
         if let Some(src) = ov.source {
             let _ = send_client_message(
                 &self.conn,
@@ -1185,22 +1306,426 @@ impl Run {
         let _ = self.conn.destroy_window(ov.win);
         let _ = self.conn.flush();
         self.dismiss_due = None;
-        if let (true, Some(target)) = (accepted, target) {
+        if let Some(segment) = segment {
             if !paths.is_empty() {
-                self.log.line(&format!(
-                    "CONVERT-REQUESTED: {} file(s) -> {target}",
-                    paths.len()
-                ));
-                let _ = self
-                    .events
-                    .send(SensorEvent::ConvertRequested { paths, target });
-                self.drag_ended_sent = true; // a conversion closes this drag
+                let (dx, dy) = ov
+                    .last_pos
+                    .map(|(x, y)| (x as i32, y as i32))
+                    .unwrap_or((ov.x as i32 + 240, ov.y as i32 + 240));
+                match ov.kind {
+                    WheelKind::Convert => {
+                        self.log.line(&format!(
+                            "CONVERT-REQUESTED: {} file(s) -> {}",
+                            paths.len(),
+                            segment.id
+                        ));
+                        let _ = self.events.send(SensorEvent::ConvertRequested {
+                            paths,
+                            target: segment.id,
+                        });
+                    }
+                    WheelKind::Tools => {
+                        self.log.line(&format!(
+                            "TOOL-REQUESTED: {} file(s) -> {}",
+                            paths.len(),
+                            segment.id
+                        ));
+                        let _ = self.events.send(SensorEvent::ToolRequested {
+                            paths,
+                            tool: segment.id,
+                            x: dx,
+                            y: dy,
+                        });
+                    }
+                    WheelKind::Actions => {
+                        self.log.line(&format!(
+                            "ACTION-REQUESTED: {} file(s) -> {}",
+                            paths.len(),
+                            segment.id
+                        ));
+                        // The two clipboard actions are executed right
+                        // here: the sensor owns the X connection and
+                        // outlives the drop; everything else is the
+                        // shell's job.
+                        if segment.id == ACTION_COPY_FILE || segment.id == ACTION_COPY_PATH {
+                            let as_files = segment.id == ACTION_COPY_FILE;
+                            self.set_clipboard(paths.clone(), as_files);
+                            let _ = self.events.send(SensorEvent::ActionDone {
+                                paths,
+                                action: segment.id,
+                            });
+                        } else {
+                            let _ = self.events.send(SensorEvent::ActionRequested {
+                                paths,
+                                action: segment.id,
+                                x: dx,
+                                y: dy,
+                            });
+                        }
+                    }
+                }
+                self.drag_ended_sent = true; // a dispatched drop closes this drag
                 return;
             }
         }
         self.log
             .line("drop finished without a conversion (hub/missed/refused)");
         self.end_drag_if_finished();
+    }
+
+    // -- HUD panel (Stage 4) -----------------------------------------------------
+
+    fn show_panel(&mut self, spec: PanelSpec) {
+        // One panel at a time: a new panel cancels the open one.
+        self.close_panel(true);
+        let state = PanelState::new(spec);
+        let (w, h) = (state.layout.width as u16, state.layout.height as u16);
+        let (ax, ay) = state.spec.anchor;
+        let x = (ax - (w as i32) / 3)
+            .max(4)
+            .min((self.screen_w as i32 - w as i32 - 4).max(4)) as i16;
+        let y = (ay + 18)
+            .max(4)
+            .min((self.screen_h as i32 - h as i32 - 4).max(4)) as i16;
+        let win = match self.conn.generate_id() {
+            Ok(wid) => wid,
+            Err(_) => return,
+        };
+        let aux = CreateWindowAux::new()
+            .background_pixel(0x0B1E3A)
+            .override_redirect(1u32)
+            .event_mask(
+                EventMask::EXPOSURE
+                    | EventMask::BUTTON_PRESS
+                    | EventMask::BUTTON_RELEASE
+                    | EventMask::POINTER_MOTION
+                    | EventMask::KEY_PRESS,
+            );
+        if self
+            .conn
+            .create_window(
+                self.depth,
+                win,
+                self.root,
+                x,
+                y,
+                w,
+                h,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                self.visual,
+                &aux,
+            )
+            .is_err()
+        {
+            self.log.line("panel create_window failed");
+            return;
+        }
+        let _ = set_prop8(
+            &self.conn,
+            PropMode::REPLACE,
+            win,
+            self.atoms.wm_name,
+            self.atoms.string_atom,
+            b"Uruk Convert Panel",
+        );
+        let _ = set_prop8(
+            &self.conn,
+            PropMode::REPLACE,
+            win,
+            self.atoms.wm_class,
+            self.atoms.string_atom,
+            b"uruk-panel\0UrukConvert",
+        );
+        let _ = self.conn.map_window(win);
+        // Keyboard: grab so typing reaches the panel from anywhere.
+        // If the grab fails (another client holds it), the panel still
+        // works by mouse; typing is best-effort in that rare case.
+        let grab_ok = match self.conn.grab_keyboard(
+            false,
+            win,
+            x11rb::CURRENT_TIME,
+            x11rb::protocol::xproto::GrabMode::ASYNC,
+            x11rb::protocol::xproto::GrabMode::ASYNC,
+        ) {
+            Ok(cookie) => matches!(
+                cookie.reply(),
+                Ok(r) if r.status == x11rb::protocol::xproto::GrabStatus::SUCCESS
+            ),
+            Err(_) => false,
+        };
+        if !grab_ok {
+            self.log.line("panel: keyboard grab not acquired (mouse still works)");
+        }
+        let _ = self.conn.flush();
+        let preview = state
+            .spec
+            .canvas
+            .as_ref()
+            .and_then(|cv| std::fs::read(&cv.image_png).ok())
+            .and_then(|bytes| crate::panel::decode_png(&bytes));
+        self.log.line(&format!(
+            "PANEL OPEN '{}' ({}x{}) at ({x},{y})",
+            state.spec.id, w, h
+        ));
+        self.panel = Some(PanelWin {
+            win,
+            state,
+            preview,
+        });
+        self.paint_panel();
+    }
+
+    fn paint_panel(&mut self) {
+        let (win, w, h, bgra) = match &self.panel {
+            Some(p) => {
+                let pm = crate::panel::render_panel(&p.state, p.preview.as_ref());
+                (
+                    p.win,
+                    pm.width() as u16,
+                    pm.height() as u16,
+                    crate::render::pixmap_to_bgra(&pm),
+                )
+            }
+            None => return,
+        };
+        self.put_image(win, w, h, &bgra);
+    }
+
+    /// Feed one pointer/key event into the open panel's state machine.
+    fn panel_event(&mut self, ev: PanelEvent) {
+        let action = match &mut self.panel {
+            Some(p) => p.state.handle(ev),
+            None => return,
+        };
+        match action {
+            PanelAction::None => {}
+            PanelAction::Redraw => self.paint_panel(),
+            PanelAction::NeedPage(page) => {
+                if let Some(p) = &self.panel {
+                    let _ = self.events.send(SensorEvent::PanelPageRequest {
+                        id: p.state.spec.id.clone(),
+                        page,
+                    });
+                }
+            }
+            PanelAction::Apply => {
+                if let Some(p) = self.panel.take() {
+                    let outcome = p.state.outcome();
+                    self.destroy_panel_window(p.win);
+                    let _ = self.events.send(SensorEvent::PanelClosed {
+                        id: p.state.spec.id.clone(),
+                        outcome,
+                    });
+                }
+            }
+            PanelAction::Cancel => {
+                if let Some(p) = self.panel.take() {
+                    self.destroy_panel_window(p.win);
+                    let _ = self.events.send(SensorEvent::PanelClosed {
+                        id: p.state.spec.id.clone(),
+                        outcome: PanelOutcome::Cancelled,
+                    });
+                }
+            }
+        }
+    }
+
+    fn destroy_panel_window(&mut self, win: u32) {
+        let _ = self.conn.ungrab_keyboard(x11rb::CURRENT_TIME);
+        let _ = self.conn.unmap_window(win);
+        let _ = self.conn.destroy_window(win);
+        let _ = self.conn.flush();
+    }
+
+    /// Close the open panel. `notify` = report it as Cancelled (used
+    /// when a new panel replaces it); host-initiated closes are silent.
+    fn close_panel(&mut self, notify: bool) {
+        if let Some(p) = self.panel.take() {
+            let id = p.state.spec.id.clone();
+            self.destroy_panel_window(p.win);
+            self.log.line(&format!("PANEL CLOSED '{id}' (notify={notify})"));
+            if notify {
+                let _ = self.events.send(SensorEvent::PanelClosed {
+                    id,
+                    outcome: PanelOutcome::Cancelled,
+                });
+            }
+        }
+    }
+
+    fn update_panel_canvas(&mut self, id: &str, png: &PathBuf, page: u32, pages: u32) {
+        let Some(p) = &mut self.panel else {
+            return;
+        };
+        if p.state.spec.id != id {
+            return;
+        }
+        if let Ok(bytes) = std::fs::read(png) {
+            if let Some(pm) = crate::panel::decode_png(&bytes) {
+                p.preview = Some(pm);
+            }
+        }
+        p.state.set_canvas_page(page, pages);
+        self.paint_panel();
+    }
+
+    /// Translate an X key press (keycode + state mask) into a panel key.
+    fn panel_key_for(&self, keycode: u8, state: u16) -> Option<PanelKey> {
+        let map = self.conn.get_keyboard_mapping(keycode, 1).ok()?.reply().ok()?;
+        let per = map.keysyms_per_keycode as usize;
+        if per == 0 || map.keysyms.is_empty() {
+            return None;
+        }
+        let shift = state & (1 << 0) != 0;
+        let idx = if shift && per > 1 { 1 } else { 0 };
+        let sym = map.keysyms.get(idx).copied().unwrap_or(0);
+        Some(match sym {
+            0xFF1B => PanelKey::Escape,
+            0xFF0D | 0xFF8D => PanelKey::Enter,
+            0xFF08 => PanelKey::Backspace,
+            0xFF09 => PanelKey::Tab,
+            0xFFFF => PanelKey::Delete,
+            0xFF51 => PanelKey::Left,
+            0xFF53 => PanelKey::Right,
+            0xFF50 => PanelKey::Home,
+            0xFF57 => PanelKey::End,
+            _ => {
+                // X11 keysym → Unicode: 0x01000000-tagged keysyms carry
+                // the codepoint in the low 24 bits (covers Arabic);
+                // Latin-1 keysyms ARE the codepoint.
+                let cp = if sym & 0xFF00_0000 == 0x0100_0000 {
+                    sym & 0x00FF_FFFF
+                } else if (0x20..=0xFF).contains(&sym) {
+                    sym
+                } else {
+                    return None;
+                };
+                PanelKey::Char(char::from_u32(cp)?)
+            }
+        })
+    }
+
+    // -- clipboard actions (Stage 4) ------------------------------------------
+
+    fn set_clipboard(&mut self, paths: Vec<PathBuf>, as_files: bool) {
+        self.clipboard = Some(ClipboardData { paths, as_files });
+        let _ = self
+            .conn
+            .set_selection_owner(self.home, self.atoms.clipboard, x11rb::CURRENT_TIME);
+        let _ = self.conn.flush();
+        self.log.line("clipboard claimed (copy action)");
+    }
+
+    fn handle_selection_request(
+        &mut self,
+        req: x11rb::protocol::xproto::SelectionRequestEvent,
+    ) {
+        use x11rb::protocol::xproto::{SelectionNotifyEvent, SELECTION_NOTIFY_EVENT};
+        if req.selection != self.atoms.clipboard {
+            return;
+        }
+        let property = if req.property == 0 { req.target } else { req.property };
+        let mut granted = property;
+        let data = self.clipboard.as_ref();
+        match data {
+            None => granted = 0,
+            Some(clip) => {
+                let paths_text = clip
+                    .paths
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if req.target == self.atoms.targets_atom {
+                    let mut targets = vec![
+                        self.atoms.targets_atom,
+                        self.atoms.utf8_string,
+                        self.atoms.string_atom,
+                        self.atoms.text_plain_utf8,
+                    ];
+                    if clip.as_files {
+                        targets.push(self.atoms.text_uri_list);
+                        targets.push(self.atoms.gnome_copied_files);
+                    }
+                    if set_prop32(
+                        &self.conn,
+                        PropMode::REPLACE,
+                        req.requestor,
+                        property,
+                        XA_ATOM,
+                        &targets,
+                    )
+                    .is_err()
+                    {
+                        granted = 0;
+                    }
+                } else if req.target == self.atoms.text_uri_list && clip.as_files {
+                    let uris = paths_to_uri_list(&clip.paths);
+                    if set_prop8(
+                        &self.conn,
+                        PropMode::REPLACE,
+                        req.requestor,
+                        property,
+                        self.atoms.text_uri_list,
+                        uris.as_bytes(),
+                    )
+                    .is_err()
+                    {
+                        granted = 0;
+                    }
+                } else if req.target == self.atoms.gnome_copied_files && clip.as_files {
+                    let uris = paths_to_uri_list(&clip.paths).replace("\r\n", "\n");
+                    let payload = format!("copy\n{uris}");
+                    if set_prop8(
+                        &self.conn,
+                        PropMode::REPLACE,
+                        req.requestor,
+                        property,
+                        self.atoms.gnome_copied_files,
+                        payload.as_bytes(),
+                    )
+                    .is_err()
+                    {
+                        granted = 0;
+                    }
+                } else if req.target == self.atoms.utf8_string
+                    || req.target == self.atoms.text_plain_utf8
+                    || req.target == self.atoms.string_atom
+                {
+                    if set_prop8(
+                        &self.conn,
+                        PropMode::REPLACE,
+                        req.requestor,
+                        property,
+                        req.target,
+                        paths_text.as_bytes(),
+                    )
+                    .is_err()
+                    {
+                        granted = 0;
+                    }
+                } else {
+                    granted = 0;
+                }
+            }
+        }
+        let notify = SelectionNotifyEvent {
+            response_type: SELECTION_NOTIFY_EVENT,
+            time: req.time,
+            sequence: 0,
+            requestor: req.requestor,
+            selection: req.selection,
+            target: req.target,
+            property: granted,
+        };
+        let _ = self.conn.send_event(
+            false,
+            req.requestor,
+            EventMask::NO_EVENT,
+            notify,
+        );
+        let _ = self.conn.flush();
     }
 
     // -- toast -----------------------------------------------------------------

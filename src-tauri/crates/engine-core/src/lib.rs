@@ -276,6 +276,11 @@ pub struct Tools {
     pub pdfimages: Option<PathBuf>,
     /// poppler-utils: PDF metadata (page count).
     pub pdfinfo: Option<PathBuf>,
+    /// Ghostscript — PDF tools (split / extract / compress / redact
+    /// page extraction). Resolved from PATH; not bundled (large).
+    pub ghostscript: Option<PathBuf>,
+    /// poppler-utils: PDF merger (split/rotate/redact page assembly).
+    pub pdfunite: Option<PathBuf>,
     /// Uppercase ImageMagick formats writable by this build (from `-list format`).
     pub magick_writable: Vec<String>,
     /// ffmpeg muxer names (from `-muxers`), e.g. contains "avif".
@@ -363,6 +368,8 @@ impl Tools {
         let pdftotext = find("uruk-pdftotext", &["pdftotext", "pdftotext.exe"]);
         let pdfimages = find("uruk-pdfimages", &["pdfimages", "pdfimages.exe"]);
         let pdfinfo = find("uruk-pdfinfo", &["pdfinfo", "pdfinfo.exe"]);
+        let ghostscript = find("uruk-gs", &["gs", "gs.exe"]);
+        let pdfunite = find("uruk-pdfunite", &["pdfunite", "pdfunite.exe"]);
 
         // ImageMagick: prefer a real `magick` binary; fall back to `convert`.
         let (magick, magick_is_convert) = match find("uruk-magick", &["magick", "magick.exe"]) {
@@ -397,6 +404,8 @@ impl Tools {
             pdftotext,
             pdfimages,
             pdfinfo,
+            ghostscript,
+            pdfunite,
             magick_writable: Vec::new(),
             ffmpeg_muxers: Vec::new(),
             ffmpeg_encoders: Vec::new(),
@@ -1686,6 +1695,78 @@ pub enum JobSpec {
         #[serde(default = "default_suffix")]
         suffix: String,
     },
+    /// Stage 4: a real transformation from the tools catalogue
+    /// (`tool_ids_for`). One job per input file (Merge carries its
+    /// extra inputs inside the ToolJob itself).
+    Tool {
+        input: String,
+        tool: ToolJob,
+        #[serde(default)]
+        output_dir: Option<String>,
+        #[serde(default = "default_suffix")]
+        suffix: String,
+    },
+}
+
+/// One Stage-4 tool invocation. Coordinates: image tools use source
+/// pixels; PDF regions use PDF points with a top-left origin (the
+/// panel's coordinate space), converted to pixels at render time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "tool", rename_all = "snake_case")]
+pub enum ToolJob {
+    ImageCrop { x: u32, y: u32, w: u32, h: u32 },
+    ImageResize {
+        #[serde(default)]
+        w: Option<u32>,
+        #[serde(default)]
+        h: Option<u32>,
+    },
+    ImageTransform {
+        /// Clockwise degrees, a multiple of 90.
+        #[serde(default)]
+        rotate: i32,
+        /// Mirror left-right (ImageMagick `-flop`).
+        #[serde(default)]
+        flip_h: bool,
+        /// Mirror top-bottom (ImageMagick `-flip`).
+        #[serde(default)]
+        flip_v: bool,
+    },
+    /// Flatten transparency onto `color` ("#RRGGBB" or a named color).
+    ImageBackground { color: String },
+    ImageStripMetadata,
+    ImageAnnotate { shapes: Vec<DrawShape> },
+    MediaTrim { start: f64, end: f64 },
+    /// One output PDF per range.
+    PdfSplit { ranges: Vec<[u32; 2]> },
+    /// `inputs` includes the job's `input` as its first element.
+    PdfMerge { inputs: Vec<String> },
+    /// One output PDF holding every ranged page, in range order.
+    PdfExtract { ranges: Vec<[u32; 2]> },
+    /// Sets /Rotate on every page (text layer untouched).
+    PdfRotate { angle: i32 },
+    /// Ghostscript PDFSETTINGS tier: "screen" | "ebook" | "printer".
+    PdfCompress { tier: String },
+    PdfRedact { regions: Vec<PdfRegion> },
+}
+
+/// A drawing primitive for the Annotate tool, in source-image pixels.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "shape", rename_all = "snake_case")]
+pub enum DrawShape {
+    Rect { x: f32, y: f32, w: f32, h: f32 },
+    Arrow { x1: f32, y1: f32, x2: f32, y2: f32 },
+    Text { x: f32, y: f32, text: String, size: f32 },
+}
+
+/// A redaction rectangle: 1-based page, PDF points, top-left origin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PdfRegion {
+    pub page: u32,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
 }
 
 fn default_suffix() -> String {
@@ -2007,6 +2088,18 @@ pub fn run_job(
             output_dir,
             suffix,
         } => create_archive(tools, inputs, format, output_dir, suffix, cancel, progress),
+        JobSpec::Tool {
+            input,
+            tool,
+            output_dir,
+            suffix,
+        } => {
+            let settings = OutputSettings {
+                output_dir: output_dir.clone(),
+                suffix: suffix.clone(),
+            };
+            run_tool(tools, &PathBuf::from(input), tool, &settings, cancel, progress)
+        }
     }
 }
 
@@ -2307,8 +2400,1094 @@ fn compress_image(
 }
 
 // ---------------------------------------------------------------------------
-// Registry used by tests and diagnostics
+// Stage 4 tools — real transformations behind the tools wheel.
+//
+// Every tool runs through `run_job` as `JobSpec::Tool`, so the GUI, the
+// overlay and the headless test CLI all exercise the same code. Routes:
+//   · Image tools — ImageMagick operations on the source pixels.
+//   · Trim — FFmpeg (`-c copy` for a tail-only trim, where packet cuts
+//     are honest; a seek into the stream re-encodes with the family's
+//     standard settings so the cut lands where the panel said).
+//   · PDF split/extract — Ghostscript page ranges.
+//   · PDF merge — pdfunite (gs concatenation as fallback).
+//   · PDF rotate — Ghostscript + a `[/Rotate N /PAGE pdfmark` pass per
+//     page: the /Rotate attribute is set and the text layer is NOT
+//     rasterized or rebuilt (verified: pdfinfo reports the rotation
+//     and pdftotext still extracts the original text).
+//   · PDF compress — Ghostscript pdfwrite with PDFSETTINGS tiers.
+//   · PDF redact — affected pages are re-rendered at 300 DPI with the
+//     regions painted INTO the raster and rebuilt as image pages, so
+//     the redacted text is genuinely absent from the output (there is
+//     no text layer left on those pages to extract). Unaffected pages
+//     pass through untouched. Painting over a live text layer would
+//     NOT be redaction and is never what this does.
 // ---------------------------------------------------------------------------
+
+pub const TOOL_CROP: &str = "crop";
+pub const TOOL_RESIZE: &str = "resize";
+pub const TOOL_TRANSFORM: &str = "transform";
+pub const TOOL_BACKGROUND: &str = "background";
+pub const TOOL_METADATA: &str = "metadata";
+pub const TOOL_ANNOTATE: &str = "annotate";
+pub const TOOL_COMPRESS_IMAGE: &str = "compress";
+pub const TOOL_TRIM: &str = "trim";
+pub const TOOL_PDF_SPLIT: &str = "split";
+pub const TOOL_PDF_MERGE: &str = "merge";
+pub const TOOL_PDF_EXTRACT: &str = "extract-pages";
+pub const TOOL_PDF_ROTATE: &str = "rotate-pdf";
+pub const TOOL_PDF_COMPRESS: &str = "compress-pdf";
+pub const TOOL_PDF_REDACT: &str = "redact";
+
+/// The tool ids valid for a file, in wheel display order. The host
+/// filters contextually (Merge needs ≥2 dragged files; Compress on the
+/// wheel applies to the first file's family only).
+pub fn tool_ids_for(path: &Path, is_dir: bool) -> Vec<&'static str> {
+    match family_of(path, is_dir) {
+        Family::Image => vec![
+            TOOL_CROP,
+            TOOL_RESIZE,
+            TOOL_TRANSFORM,
+            TOOL_BACKGROUND,
+            TOOL_ANNOTATE,
+            TOOL_METADATA,
+            TOOL_COMPRESS_IMAGE,
+        ],
+        Family::Video | Family::Audio => vec![TOOL_TRIM, TOOL_METADATA],
+        Family::Pdf => vec![
+            TOOL_PDF_SPLIT,
+            TOOL_PDF_MERGE,
+            TOOL_PDF_EXTRACT,
+            TOOL_PDF_ROTATE,
+            TOOL_PDF_REDACT,
+            TOOL_PDF_COMPRESS,
+            TOOL_METADATA,
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// Parse a page-range spec like "1-3,5,8-9" into 1-based inclusive
+/// ranges. The panels collect this as free text (with chips filling it
+/// in), so the grammar is deliberately tiny and strict.
+pub fn parse_page_ranges(spec: &str) -> Result<Vec<[u32; 2]>, String> {
+    let mut out = Vec::new();
+    for part in spec.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (a, b) = if let Some((x, y)) = part.split_once('-') {
+            (
+                x.trim().parse::<u32>().map_err(|_| format!("bad range '{part}'"))?,
+                y.trim().parse::<u32>().map_err(|_| format!("bad range '{part}'"))?,
+            )
+        } else {
+            let n = part.parse::<u32>().map_err(|_| format!("bad page '{part}'"))?;
+            (n, n)
+        };
+        if a == 0 || b == 0 || a > b {
+            return Err(format!("bad range '{part}' (pages start at 1)"));
+        }
+        out.push([a, b]);
+    }
+    if out.is_empty() {
+        return Err("no pages given".into());
+    }
+    Ok(out)
+}
+
+/// Total pages covered by ranges (order preserved, overlaps counted).
+fn ranges_page_total(ranges: &[[u32; 2]]) -> u32 {
+    ranges.iter().map(|r| r[1] - r[0] + 1).sum()
+}
+
+fn validate_ranges(ranges: &[[u32; 2]], pages: u32) -> EngineResult<()> {
+    for r in ranges {
+        if r[0] < 1 || r[1] > pages || r[0] > r[1] {
+            return Err(EngineError::unsupported(format!(
+                "Page range {}–{} is outside this PDF's {pages} page(s).",
+                r[0], r[1]
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn pdf_pages_required(tools: &Tools, pdf: &Path) -> EngineResult<u32> {
+    pdf_page_count(tools, pdf).ok_or_else(|| EngineError::tool_missing("poppler (pdfinfo)"))
+}
+
+/// Per-page sizes in points, via `pdfinfo -f 1 -l N`.
+fn pdf_page_sizes(tools: &Tools, pdf: &Path, pages: u32) -> EngineResult<Vec<(f32, f32)>> {
+    let pdfinfo = tools
+        .pdfinfo
+        .clone()
+        .ok_or_else(|| EngineError::tool_missing("poppler (pdfinfo)"))?;
+    let p = pdf.to_string_lossy().into_owned();
+    let out = run_capture(
+        &pdfinfo,
+        &["-f", "1", "-l", &pages.to_string(), p.as_str()],
+    )
+    .ok_or_else(|| EngineError::new("tool_failed", "pdfinfo could not read page sizes."))?;
+    let mut sizes = Vec::new();
+    for line in out.lines() {
+        if let Some(rest) = line.split("size:").nth(1) {
+            let toks: Vec<&str> = rest.split_whitespace().collect();
+            if toks.len() >= 3 {
+                if let (Ok(w), Ok(h)) = (toks[0].parse::<f32>(), toks[2].parse::<f32>()) {
+                    sizes.push((w, h));
+                }
+            }
+        }
+    }
+    if sizes.len() != pages as usize {
+        return Err(EngineError::new(
+            "tool_failed",
+            format!(
+                "pdfinfo reported {} page sizes for a {pages}-page PDF.",
+                sizes.len()
+            ),
+        ));
+    }
+    Ok(sizes)
+}
+
+/// Run ImageMagick as `[input, ops…, output]` and require output to exist.
+fn magick_tool_run(
+    tools: &Tools,
+    input: &Path,
+    ops: &[String],
+    output: &Path,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut dyn FnMut(f32),
+) -> EngineResult<()> {
+    let (magick, _) = tools
+        .magick_argv()
+        .ok_or_else(|| EngineError::tool_missing("ImageMagick"))?;
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| EngineError::new("io", format!("Cannot create output folder: {e}")))?;
+    }
+    let mut args: Vec<String> = vec![input.to_string_lossy().into_owned()];
+    args.extend(ops.iter().cloned());
+    args.push(output.to_string_lossy().into_owned());
+    let spec = CommandSpec {
+        program: magick,
+        args,
+        tool_name: "ImageMagick".into(),
+    };
+    progress(-1.0);
+    run_streaming(&spec, None, cancel, progress)?;
+    if !output.is_file() {
+        return Err(EngineError::new(
+            "tool_failed",
+            "ImageMagick finished without producing a file.",
+        ));
+    }
+    Ok(())
+}
+
+fn gs_tool(tools: &Tools) -> EngineResult<PathBuf> {
+    tools
+        .ghostscript
+        .clone()
+        .ok_or_else(|| EngineError::tool_missing("Ghostscript"))
+}
+
+/// Extract pages first..=last of `input` to `dest` with Ghostscript.
+/// `marks` is an optional PostScript file (pdfmarks) applied to the
+/// extracted page — the rotate route.
+fn gs_extract_pages(
+    tools: &Tools,
+    input: &Path,
+    first: u32,
+    last: u32,
+    dest: &Path,
+    marks: Option<&Path>,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut dyn FnMut(f32),
+) -> EngineResult<()> {
+    let gs = gs_tool(tools)?;
+    let mut args: Vec<String> = vec![
+        s("-q"),
+        s("-dBATCH"),
+        s("-dNOPAUSE"),
+        s("-sDEVICE=pdfwrite"),
+        format!("-dFirstPage={first}"),
+        format!("-dLastPage={last}"),
+        s("-o"),
+        dest.to_string_lossy().into_owned(),
+    ];
+    if let Some(m) = marks {
+        args.push(m.to_string_lossy().into_owned());
+    }
+    args.extend([s("-f"), input.to_string_lossy().into_owned()]);
+    let spec = CommandSpec {
+        program: gs,
+        args,
+        tool_name: "Ghostscript".into(),
+    };
+    progress(-1.0);
+    run_streaming(&spec, None, cancel, progress)?;
+    if !dest.is_file() {
+        return Err(EngineError::new(
+            "tool_failed",
+            "Ghostscript finished without producing a file.",
+        ));
+    }
+    Ok(())
+}
+
+/// Concatenate single-purpose PDFs into `dest`: pdfunite when present
+/// (it preserves the most), Ghostscript pdfwrite otherwise.
+fn unite_pdfs(
+    tools: &Tools,
+    parts: &[PathBuf],
+    dest: &Path,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut dyn FnMut(f32),
+) -> EngineResult<()> {
+    if parts.len() == 1 {
+        return move_file(&parts[0], dest);
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| EngineError::new("io", format!("Cannot create output folder: {e}")))?;
+    }
+    if let Some(unite) = &tools.pdfunite {
+        let mut args: Vec<String> = parts.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        args.push(dest.to_string_lossy().into_owned());
+        let spec = CommandSpec {
+            program: unite.clone(),
+            args,
+            tool_name: "poppler (pdfunite)".into(),
+        };
+        progress(-1.0);
+        run_streaming(&spec, None, cancel, progress)?;
+    } else {
+        let gs = gs_tool(tools)?;
+        let mut args: Vec<String> = vec![
+            s("-q"),
+            s("-dBATCH"),
+            s("-dNOPAUSE"),
+            s("-sDEVICE=pdfwrite"),
+            s("-o"),
+            dest.to_string_lossy().into_owned(),
+        ];
+        args.extend(parts.iter().map(|p| p.to_string_lossy().into_owned()));
+        let spec = CommandSpec {
+            program: gs,
+            args,
+            tool_name: "Ghostscript".into(),
+        };
+        progress(-1.0);
+        run_streaming(&spec, None, cancel, progress)?;
+    }
+    if !dest.is_file() {
+        return Err(EngineError::new(
+            "tool_failed",
+            "The merged PDF was not produced.",
+        ));
+    }
+    Ok(())
+}
+
+/// `doc.converted.pdf` + tag → `doc.converted-p3-5.pdf` (never overwrites).
+fn tagged_pdf_path(base: &Path, tag: &str) -> PathBuf {
+    let dir = base.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let stem = stem_of(base);
+    let mut candidate = dir.join(format!("{stem}-{tag}.pdf"));
+    let mut n = 2;
+    while candidate.exists() {
+        candidate = dir.join(format!("{stem}-{tag} ({n}).pdf"));
+        n += 1;
+    }
+    candidate
+}
+
+fn run_tool(
+    tools: &Tools,
+    input: &Path,
+    tool: &ToolJob,
+    settings: &OutputSettings,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut dyn FnMut(f32),
+) -> EngineResult<JobOutcome> {
+    let family = family_of(input, false);
+    let ext = extension_of(input);
+    match tool {
+        ToolJob::ImageCrop { x, y, w, h } => {
+            if family != Family::Image {
+                return Err(EngineError::unsupported("Crop applies to images."));
+            }
+            if *w == 0 || *h == 0 {
+                return Err(EngineError::unsupported("Crop width and height must be at least 1 pixel."));
+            }
+            let out = output_path(input, &ext, settings);
+            let geom = format!("{w}x{h}+{x}+{y}");
+            magick_tool_run(tools, input, &[s("-crop"), s(geom), s("+repage")], &out, cancel, progress)?;
+            Ok(JobOutcome {
+                output: out,
+                note: Some(format!("Cropped to {w}×{h} at ({x}, {y})")),
+            })
+        }
+        ToolJob::ImageResize { w, h } => {
+            if family != Family::Image {
+                return Err(EngineError::unsupported("Resize applies to images."));
+            }
+            let geom = match (w, h) {
+                (Some(w), Some(h)) if *w > 0 && *h > 0 => format!("{w}x{h}"),
+                (Some(w), None) if *w > 0 => format!("{w}x"),
+                (None, Some(h)) if *h > 0 => format!("x{h}"),
+                _ => {
+                    return Err(EngineError::unsupported(
+                        "Resize needs a width, a height, or both.",
+                    ))
+                }
+            };
+            let out = output_path(input, &ext, settings);
+            magick_tool_run(tools, input, &[s("-resize"), s(geom)], &out, cancel, progress)?;
+            let dims = probe(tools, &out).dimensions.unwrap_or_default();
+            Ok(JobOutcome {
+                output: out,
+                note: Some(format!("Resized to {dims}")),
+            })
+        }
+        ToolJob::ImageTransform { rotate, flip_h, flip_v } => {
+            if family != Family::Image {
+                return Err(EngineError::unsupported("Rotate/flip applies to images."));
+            }
+            if rotate % 90 != 0 {
+                return Err(EngineError::unsupported("Image rotation must be a multiple of 90°."));
+            }
+            let mut ops: Vec<String> = Vec::new();
+            let turns = ((rotate % 360) + 360) % 360;
+            if turns != 0 {
+                // Alpha-capable targets keep transparency in the corners
+                // the rotation exposes; the rest flatten onto white (the
+                // same convention as the JPG conversion route).
+                let bg = if matches!(ext.as_str(), "png" | "webp" | "tiff" | "avif") {
+                    "none"
+                } else {
+                    "white"
+                };
+                ops.extend([s("-background"), s(bg), s("-rotate"), s(turns.to_string())]);
+            }
+            if *flip_h {
+                ops.push(s("-flop"));
+            }
+            if *flip_v {
+                ops.push(s("-flip"));
+            }
+            if ops.is_empty() {
+                return Err(EngineError::unsupported("Nothing to do: no rotation or flip selected."));
+            }
+            let out = output_path(input, &ext, settings);
+            magick_tool_run(tools, input, &ops, &out, cancel, progress)?;
+            Ok(JobOutcome { output: out, note: None })
+        }
+        ToolJob::ImageBackground { color } => {
+            if family != Family::Image {
+                return Err(EngineError::unsupported("Add Background applies to images."));
+            }
+            if !valid_color(color) {
+                return Err(EngineError::unsupported(format!(
+                    "'{color}' is not a color the background tool accepts (use #RRGGBB or a basic color name)."
+                )));
+            }
+            let out = output_path(input, &ext, settings);
+            magick_tool_run(
+                tools,
+                input,
+                &[s("-background"), s(color), s("-flatten")],
+                &out,
+                cancel,
+                progress,
+            )?;
+            Ok(JobOutcome {
+                output: out,
+                note: Some(format!("Transparency flattened onto {color}")),
+            })
+        }
+        ToolJob::ImageStripMetadata => {
+            if family != Family::Image {
+                return Err(EngineError::unsupported(
+                    "Metadata strip applies to images (EXIF / IPTC / XMP / comments).",
+                ));
+            }
+            let out = output_path(input, &ext, settings);
+            magick_tool_run(tools, input, &[s("-strip")], &out, cancel, progress)?;
+            Ok(JobOutcome {
+                output: out,
+                note: Some("All metadata (EXIF, IPTC, XMP, profiles, comments) removed".into()),
+            })
+        }
+        ToolJob::ImageAnnotate { shapes } => tool_annotate(tools, input, shapes, settings, cancel, progress),
+        ToolJob::MediaTrim { start, end } => {
+            tool_trim(tools, input, *start, *end, settings, cancel, progress)
+        }
+        ToolJob::PdfSplit { ranges } => {
+            if family != Family::Pdf {
+                return Err(EngineError::unsupported("Split applies to PDFs."));
+            }
+            let pages = pdf_pages_required(tools, input)?;
+            validate_ranges(ranges, pages)?;
+            let base = output_path(input, "pdf", settings);
+            let mut outs = Vec::new();
+            for r in ranges {
+                let dest = tagged_pdf_path(&base, &format!("p{}-{}", r[0], r[1]));
+                gs_extract_pages(tools, input, r[0], r[1], &dest, None, cancel, progress)?;
+                outs.push(dest);
+            }
+            let first = outs[0].clone();
+            Ok(JobOutcome {
+                output: first,
+                note: Some(format!(
+                    "Split into {} file(s): {}",
+                    outs.len(),
+                    outs.iter()
+                        .map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            })
+        }
+        ToolJob::PdfMerge { inputs } => {
+            if inputs.len() < 2 {
+                return Err(EngineError::unsupported("Merge needs at least two PDF files."));
+            }
+            let paths: Vec<PathBuf> = inputs.iter().map(PathBuf::from).collect();
+            for p in &paths {
+                if family_of(p, false) != Family::Pdf || !p.is_file() {
+                    return Err(EngineError::unsupported(format!(
+                        "'{}' is not a PDF file.",
+                        p.file_name().unwrap_or_default().to_string_lossy()
+                    )));
+                }
+            }
+            let out = output_path(input, "pdf", settings);
+            unite_pdfs(tools, &paths, &out, cancel, progress)?;
+            let pages = pdf_page_count(tools, &out).unwrap_or(0);
+            Ok(JobOutcome {
+                output: out,
+                note: Some(format!("Merged {} PDFs into one ({pages} pages)", paths.len())),
+            })
+        }
+        ToolJob::PdfExtract { ranges } => {
+            if family != Family::Pdf {
+                return Err(EngineError::unsupported("Extract Pages applies to PDFs."));
+            }
+            let pages = pdf_pages_required(tools, input)?;
+            validate_ranges(ranges, pages)?;
+            let staging = staging_dir("pdfextract")?;
+            let result = (|| -> EngineResult<JobOutcome> {
+                let mut parts = Vec::new();
+                for (i, r) in ranges.iter().enumerate() {
+                    let part = staging.join(format!("part-{i}.pdf"));
+                    gs_extract_pages(tools, input, r[0], r[1], &part, None, cancel, progress)?;
+                    parts.push(part);
+                }
+                let out = output_path(input, "pdf", settings);
+                unite_pdfs(tools, &parts, &out, cancel, progress)?;
+                Ok(JobOutcome {
+                    output: out,
+                    note: Some(format!(
+                        "Extracted {} page(s) into a new PDF",
+                        ranges_page_total(ranges)
+                    )),
+                })
+            })();
+            let _ = std::fs::remove_dir_all(&staging);
+            result
+        }
+        ToolJob::PdfRotate { angle } => tool_pdf_rotate(tools, input, *angle, settings, cancel, progress),
+        ToolJob::PdfCompress { tier } => {
+            if family != Family::Pdf {
+                return Err(EngineError::unsupported("Compress applies to PDFs."));
+            }
+            let preset = match tier.as_str() {
+                "screen" => "/screen",
+                "ebook" => "/ebook",
+                "printer" => "/printer",
+                other => {
+                    return Err(EngineError::unsupported(format!(
+                        "Unknown PDF compress tier '{other}' (screen / ebook / printer)."
+                    )))
+                }
+            };
+            let gs = gs_tool(tools)?;
+            let out = output_path(input, "pdf", settings);
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| EngineError::new("io", format!("Cannot create output folder: {e}")))?;
+            }
+            let spec = CommandSpec {
+                program: gs,
+                args: vec![
+                    s("-q"),
+                    s("-dBATCH"),
+                    s("-dNOPAUSE"),
+                    s("-sDEVICE=pdfwrite"),
+                    s("-dCompatibilityLevel=1.5"),
+                    s(format!("-dPDFSETTINGS={preset}")),
+                    s("-o"),
+                    out.to_string_lossy().into_owned(),
+                    input.to_string_lossy().into_owned(),
+                ],
+                tool_name: "Ghostscript".into(),
+            };
+            progress(-1.0);
+            run_streaming(&spec, None, cancel, progress)?;
+            if !out.is_file() {
+                return Err(EngineError::new("tool_failed", "Ghostscript produced no compressed PDF."));
+            }
+            let before = std::fs::metadata(input).map(|m| m.len()).unwrap_or(0);
+            let after = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+            Ok(JobOutcome {
+                output: out,
+                note: Some(format!(
+                    "Compressed ({tier}): {} KB → {} KB",
+                    before / 1024,
+                    after / 1024
+                )),
+            })
+        }
+        ToolJob::PdfRedact { regions } => tool_pdf_redact(tools, input, regions, settings, cancel, progress),
+    }
+}
+
+/// #RRGGBB or a short whitelist of CSS color names — the value goes
+/// straight into an ImageMagick argv, so the charset stays tight.
+fn valid_color(color: &str) -> bool {
+    if let Some(hex) = color.strip_prefix('#') {
+        return hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    matches!(
+        color,
+        "white" | "black" | "red" | "green" | "blue" | "yellow" | "gold" | "gray" | "grey"
+            | "orange" | "purple" | "pink" | "brown" | "cyan" | "magenta"
+    )
+}
+
+fn tool_trim(
+    tools: &Tools,
+    input: &Path,
+    start: f64,
+    end: f64,
+    settings: &OutputSettings,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut dyn FnMut(f32),
+) -> EngineResult<JobOutcome> {
+    let family = family_of(input, false);
+    if !matches!(family, Family::Video | Family::Audio) {
+        return Err(EngineError::unsupported("Trim applies to audio and video files."));
+    }
+    if start < 0.0 || end <= start {
+        return Err(EngineError::unsupported("Trim end must be after trim start."));
+    }
+    let ffmpeg = tools
+        .ffmpeg
+        .clone()
+        .ok_or_else(|| EngineError::tool_missing("FFmpeg"))?;
+    let ext = extension_of(input);
+    let out = output_path(input, &ext, settings);
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| EngineError::new("io", format!("Cannot create output folder: {e}")))?;
+    }
+    let in_s = input.to_string_lossy().into_owned();
+    let out_s = out.to_string_lossy().into_owned();
+    let fmt_t = |t: f64| format!("{t:.3}");
+    let args = if start < 0.05 {
+        // Tail-only trim: the cut is at the stream head, so stream copy
+        // is frame-honest and instant.
+        vec![
+            s("-y"),
+            s("-i"),
+            s(in_s),
+            s("-to"),
+            s(fmt_t(end)),
+            s("-c"),
+            s("copy"),
+            s(out_s),
+        ]
+    } else {
+        // A real seek: re-encode with the family's standard settings
+        // (the exact codec sets conversions use), with output-side
+        // -ss/-to so the cut lands on the requested timestamps.
+        let norm = match ext.as_str() {
+            "aif" => "aiff",
+            "jpeg" => "jpg",
+            other => other,
+        };
+        let mut full = if family == Family::Video {
+            ffmpeg_video_args(&in_s, &out_s, &norm)?
+        } else {
+            ffmpeg_audio_args(&in_s, &out_s, &norm)?
+        };
+        let cut = [s("-ss"), s(fmt_t(start)), s("-to"), s(fmt_t(end))];
+        let at = full.len() - 1; // just before the output path
+        for (i, a) in cut.into_iter().enumerate() {
+            full.insert(at + i, a);
+        }
+        full
+    };
+    let spec = CommandSpec {
+        program: ffmpeg,
+        args,
+        tool_name: "FFmpeg".into(),
+    };
+    let pr = probe(tools, input);
+    progress(-1.0);
+    run_streaming(&spec, pr.duration, cancel, progress)?;
+    if !out.is_file() {
+        return Err(EngineError::new("tool_failed", "FFmpeg produced no trimmed file."));
+    }
+    Ok(JobOutcome {
+        output: out,
+        note: Some(format!("Trimmed to {start:.1}s – {end:.1}s (stream copy: {})", start < 0.05)),
+    })
+}
+
+/// Rotate every page of a PDF by setting its /Rotate attribute via a
+/// Ghostscript pdfmark pass per page (proven route: text layer intact,
+/// viewers honour the attribute; the page content is never redrawn).
+fn tool_pdf_rotate(
+    tools: &Tools,
+    input: &Path,
+    angle: i32,
+    settings: &OutputSettings,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut dyn FnMut(f32),
+) -> EngineResult<JobOutcome> {
+    if family_of(input, false) != Family::Pdf {
+        return Err(EngineError::unsupported("Rotate Pages applies to PDFs."));
+    }
+    let angle = ((angle % 360) + 360) % 360;
+    if angle == 0 || angle % 90 != 0 {
+        return Err(EngineError::unsupported("PDF rotation must be 90, 180 or 270 degrees."));
+    }
+    let pages = pdf_pages_required(tools, input)?;
+    let staging = staging_dir("pdfrotate")?;
+    let result = (|| -> EngineResult<JobOutcome> {
+        let marks = staging.join("rotate.ps");
+        std::fs::write(&marks, format!("[/Rotate {angle} /PAGE pdfmark\n"))
+            .map_err(|e| EngineError::new("io", format!("Cannot stage rotation marks: {e}")))?;
+        let mut parts = Vec::new();
+        for p in 1..=pages {
+            let part = staging.join(format!("page-{p}.pdf"));
+            gs_extract_pages(tools, input, p, p, &part, Some(&marks), cancel, progress)?;
+            parts.push(part);
+        }
+        let out = output_path(input, "pdf", settings);
+        unite_pdfs(tools, &parts, &out, cancel, progress)?;
+        Ok(JobOutcome {
+            output: out,
+            note: Some(format!("All {pages} page(s) rotated {angle}° (text layer preserved)")),
+        })
+    })();
+    let _ = std::fs::remove_dir_all(&staging);
+    result
+}
+
+const REDACT_DPI: f32 = 300.0;
+
+/// Redact regions from a PDF — honestly. Each affected page is
+/// rendered at 300 DPI, the regions are painted into the raster, and
+/// the page is rebuilt as an image page: the redacted text no longer
+/// exists in the output in ANY form (no hidden text layer). Unaffected
+/// pages are extracted byte-faithful via Ghostscript and united in
+/// order. (Regions address the unrotated page space.)
+fn tool_pdf_redact(
+    tools: &Tools,
+    input: &Path,
+    regions: &[PdfRegion],
+    settings: &OutputSettings,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut dyn FnMut(f32),
+) -> EngineResult<JobOutcome> {
+    if family_of(input, false) != Family::Pdf {
+        return Err(EngineError::unsupported("Redact applies to PDFs."));
+    }
+    if regions.is_empty() {
+        return Err(EngineError::unsupported("No redaction regions were drawn."));
+    }
+    let pdftoppm = tools
+        .pdftoppm
+        .clone()
+        .ok_or_else(|| EngineError::tool_missing("poppler (pdftoppm)"))?;
+    let pages = pdf_pages_required(tools, input)?;
+    let sizes = pdf_page_sizes(tools, input, pages)?;
+    // Validate + clamp regions to their page bounds; group by page.
+    let mut by_page: std::collections::BTreeMap<u32, Vec<PdfRegion>> = Default::default();
+    for r in regions {
+        if r.page < 1 || r.page > pages {
+            return Err(EngineError::unsupported(format!(
+                "Redaction region is on page {}, but the PDF has {pages} page(s).",
+                r.page
+            )));
+        }
+        let (pw, ph) = sizes[(r.page - 1) as usize];
+        let x = r.x.clamp(0.0, pw);
+        let y = r.y.clamp(0.0, ph);
+        let w = r.w.min(pw - x);
+        let h = r.h.min(ph - y);
+        if w < 1.0 || h < 1.0 {
+            return Err(EngineError::unsupported(
+                "A redaction region falls entirely outside its page.",
+            ));
+        }
+        by_page.entry(r.page).or_default().push(PdfRegion {
+            page: r.page,
+            x,
+            y,
+            w,
+            h,
+        });
+    }
+    let staging = staging_dir("pdfredact")?;
+    let result = (|| -> EngineResult<JobOutcome> {
+        let mut parts: Vec<PathBuf> = Vec::new();
+        let scale = REDACT_DPI / 72.0;
+        for p in 1..=pages {
+            let part = staging.join(format!("page-{p}.pdf"));
+            if let Some(rects) = by_page.get(&p) {
+                // Render this page at 300 DPI.
+                let prefix = staging.join(format!("render-{p}"));
+                let spec = CommandSpec {
+                    program: pdftoppm.clone(),
+                    args: vec![
+                        s("-f"),
+                        s(p.to_string()),
+                        s("-l"),
+                        s(p.to_string()),
+                        s("-r"),
+                        s(REDACT_DPI.to_string()),
+                        s("-png"),
+                        s("-singlefile"),
+                        input.to_string_lossy().into_owned(),
+                        prefix.to_string_lossy().into_owned(),
+                    ],
+                    tool_name: "poppler".into(),
+                };
+                progress(-1.0);
+                run_streaming(&spec, None, cancel, progress)?;
+                let png = staging.join(format!("render-{p}.png"));
+                if !png.is_file() {
+                    return Err(EngineError::new("tool_failed", "pdftoppm did not render the page."));
+                }
+                // Paint the regions into the raster, then rebuild the
+                // page as an image PDF at the original physical size.
+                let mut ops: Vec<String> = vec![s("-fill"), s("black"), s("-stroke"), s("none")];
+                for r in rects {
+                    let x1 = (r.x * scale).round() as i64;
+                    let y1 = (r.y * scale).round() as i64;
+                    let x2 = ((r.x + r.w) * scale).round() as i64;
+                    let y2 = ((r.y + r.h) * scale).round() as i64;
+                    ops.extend([s("-draw"), s(format!("rectangle {x1},{y1} {x2},{y2}"))]);
+                }
+                ops.extend([
+                    s("-units"),
+                    s("PixelsPerInch"),
+                    s("-density"),
+                    s(REDACT_DPI.to_string()),
+                ]);
+                magick_tool_run(tools, &png, &ops, &part, cancel, progress)?;
+            } else {
+                gs_extract_pages(tools, input, p, p, &part, None, cancel, progress)?;
+            }
+            parts.push(part);
+        }
+        let out = output_path(input, "pdf", settings);
+        unite_pdfs(tools, &parts, &out, cancel, progress)?;
+        let rebuilt: Vec<String> = by_page.keys().map(|p| p.to_string()).collect();
+        Ok(JobOutcome {
+            output: out,
+            note: Some(format!(
+                "Redacted: page(s) {} rebuilt as 300-DPI images so the covered text is truly removed; other pages untouched",
+                rebuilt.join(", ")
+            )),
+        })
+    })();
+    let _ = std::fs::remove_dir_all(&staging);
+    result
+}
+
+fn escape_draw_text(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+/// Pick a font ImageMagick can actually use for annotation text.
+fn pick_annotate_font(tools: &Tools) -> Option<String> {
+    let (magick, _) = tools.magick_argv()?;
+    let list = run_capture(&magick, &["-list", "font"])?;
+    let available: Vec<String> = list
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("Font:"))
+        .map(|f| f.trim().to_string())
+        .collect();
+    for want in ["DejaVu-Sans", "Noto-Sans", "Liberation-Sans", "Arial", "Helvetica"] {
+        if available.iter().any(|f| f == want) {
+            return Some(want.to_string());
+        }
+    }
+    available.into_iter().next()
+}
+
+fn tool_annotate(
+    tools: &Tools,
+    input: &Path,
+    shapes: &[DrawShape],
+    settings: &OutputSettings,
+    cancel: &Arc<AtomicBool>,
+    progress: &mut dyn FnMut(f32),
+) -> EngineResult<JobOutcome> {
+    if family_of(input, false) != Family::Image {
+        return Err(EngineError::unsupported("Annotate applies to images."));
+    }
+    if shapes.is_empty() {
+        return Err(EngineError::unsupported("Nothing was drawn on the annotation canvas."));
+    }
+    let pr = probe(tools, input);
+    let (iw, ih) = pr
+        .dimensions
+        .as_deref()
+        .and_then(|d| d.split_once('x'))
+        .and_then(|(a, b)| Some((a.parse::<f32>().ok()?, b.parse::<f32>().ok()?)))
+        .unwrap_or((1000.0, 1000.0));
+    let stroke_w = ((iw.min(ih) / 150.0).round() as i64).clamp(3, 14);
+    let ink = "#C9A227"; // URUK gold
+    let mut ops: Vec<String> = vec![
+        s("-stroke"),
+        s(ink),
+        s("-strokewidth"),
+        s(stroke_w.to_string()),
+    ];
+    let font = if shapes.iter().any(|sh| matches!(sh, DrawShape::Text { .. })) {
+        pick_annotate_font(tools)
+    } else {
+        None
+    };
+    for shape in shapes {
+        match shape {
+            DrawShape::Rect { x, y, w, h } => {
+                ops.extend([
+                    s("-fill"),
+                    s("none"),
+                    s("-draw"),
+                    s(format!(
+                        "rectangle {:.0},{:.0} {:.0},{:.0}",
+                        x,
+                        y,
+                        x + w,
+                        y + h
+                    )),
+                ]);
+            }
+            DrawShape::Arrow { x1, y1, x2, y2 } => {
+                ops.extend([s("-fill"), s("none"), s("-draw"), s(format!("line {x1:.0},{y1:.0} {x2:.0},{y2:.0}"))]);
+                // Arrowhead: two short lines at ±155° from the shaft.
+                let ang = (y2 - y1).atan2(x2 - x1);
+                let head = (stroke_w as f32 * 3.2).max(16.0);
+                for da in [2.72f32, -2.72] {
+                    let hx = x2 + head * (ang + da).cos();
+                    let hy = y2 + head * (ang + da).sin();
+                    ops.extend([s("-draw"), s(format!("line {x2:.0},{y2:.0} {hx:.0},{hy:.0}"))]);
+                }
+            }
+            DrawShape::Text { x, y, text, size } => {
+                let size = if *size > 0.0 { *size } else { 36.0 };
+                ops.extend([s("-fill"), s(ink), s("-stroke"), s("none")]);
+                if let Some(f) = &font {
+                    ops.extend([s("-font"), s(f.clone())]);
+                }
+                ops.extend([
+                    s("-pointsize"),
+                    s(format!("{size:.0}")),
+                    s("-draw"),
+                    s(format!("text {x:.0},{y:.0} '{}'", escape_draw_text(text))),
+                    s("-stroke"),
+                    s(ink),
+                ]);
+            }
+        }
+    }
+    let out = output_path(input, &extension_of(input), settings);
+    magick_tool_run(tools, input, &ops, &out, cancel, progress)?;
+    Ok(JobOutcome {
+        output: out,
+        note: Some(format!("Annotated with {} shape(s)", shapes.len())),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Metadata view (the Metadata tool's read half — view + strip for
+// images; view-only for PDF and media, whose panels offer no strip).
+// ---------------------------------------------------------------------------
+
+pub fn read_metadata(tools: &Tools, path: &Path) -> EngineResult<Vec<(String, String)>> {
+    let family = family_of(path, path.is_dir());
+    match family {
+        Family::Image => read_image_metadata(tools, path),
+        Family::Pdf => {
+            let pdfinfo = tools
+                .pdfinfo
+                .clone()
+                .ok_or_else(|| EngineError::tool_missing("poppler (pdfinfo)"))?;
+            let p = path.to_string_lossy().into_owned();
+            let out = run_capture(&pdfinfo, &[p.as_str()])
+                .ok_or_else(|| EngineError::new("tool_failed", "pdfinfo could not read this PDF."))?;
+            let mut entries = Vec::new();
+            for line in out.lines() {
+                if let Some((k, v)) = line.split_once(':') {
+                    let v = v.trim();
+                    if !v.is_empty() {
+                        entries.push((k.trim().to_string(), v.to_string()));
+                    }
+                }
+            }
+            Ok(entries)
+        }
+        Family::Audio | Family::Video => {
+            let ffprobe = tools
+                .ffprobe
+                .clone()
+                .ok_or_else(|| EngineError::tool_missing("FFprobe"))?;
+            let out = run_capture(
+                &ffprobe,
+                &[
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=codec_type,codec_name,width,height",
+                    "-show_entries",
+                    "format=format_name,duration,size,tags",
+                    "-of",
+                    "json",
+                    &path.to_string_lossy(),
+                ],
+            )
+            .ok_or_else(|| EngineError::new("tool_failed", "ffprobe could not read this file."))?;
+            let v: serde_json::Value = serde_json::from_str(&out)
+                .map_err(|e| EngineError::new("tool_failed", format!("ffprobe output unreadable: {e}")))?;
+            let mut entries: Vec<(String, String)> = Vec::new();
+            if let Some(fmt) = v.get("format") {
+                if let Some(n) = fmt.get("format_name").and_then(|x| x.as_str()) {
+                    entries.push(("Format".into(), n.to_string()));
+                }
+                if let Some(d) = fmt
+                    .get("duration")
+                    .and_then(|x| x.as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| x.as_f64()))
+                {
+                    entries.push(("Duration".into(), format!("{d:.1} s")));
+                }
+                if let Some(tags) = fmt.get("tags").and_then(|t| t.as_object()) {
+                    let mut pairs: Vec<_> = tags.iter().collect();
+                    pairs.sort_by(|a, b| a.0.cmp(b.0));
+                    for (k, val) in pairs {
+                        if let Some(sv) = val.as_str() {
+                            if !sv.trim().is_empty() {
+                                entries.push((k.clone(), sv.to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(streams) = v.get("streams").and_then(|s| s.as_array()) {
+                for st in streams {
+                    let kind = st.get("codec_type").and_then(|x| x.as_str()).unwrap_or("");
+                    let codec = st.get("codec_name").and_then(|x| x.as_str()).unwrap_or("");
+                    if codec.is_empty() {
+                        continue;
+                    }
+                    let label = match kind {
+                        "video" => "Video",
+                        "audio" => "Audio",
+                        _ => "Stream",
+                    };
+                    let dims = match (st.get("width").and_then(|x| x.as_u64()), st.get("height").and_then(|x| x.as_u64())) {
+                        (Some(w), Some(h)) => format!(" {w}×{h}"),
+                        _ => String::new(),
+                    };
+                    entries.push((label.into(), format!("{codec}{dims}")));
+                }
+            }
+            Ok(entries)
+        }
+        _ => Err(EngineError::unsupported(
+            "Metadata view is available for images, PDFs, audio and video files.",
+        )),
+    }
+}
+
+fn read_image_metadata(tools: &Tools, path: &Path) -> EngineResult<Vec<(String, String)>> {
+    // Same identify resolution as probe(): IM6 uses the sibling binary,
+    // IM7 uses `magick identify`.
+    let identify_prog: Option<(PathBuf, bool)> = if tools.magick_is_convert {
+        tools.magick.as_ref().and_then(|m| {
+            let sibling = m.with_file_name("identify");
+            if sibling.is_file() {
+                Some((sibling, false))
+            } else {
+                find_on_path(&["identify"]).map(|p| (p, false))
+            }
+        })
+    } else {
+        tools.magick.clone().map(|p| (p, true))
+    };
+    let (prog, subcommand) = identify_prog
+        .ok_or_else(|| EngineError::tool_missing("ImageMagick"))?;
+    let mut args: Vec<String> = Vec::new();
+    if subcommand {
+        args.push("identify".into());
+    }
+    args.extend([s("-verbose"), path.to_string_lossy().into_owned()]);
+    let arg_refs: Vec<&str> = args.iter().map(|x| x.as_str()).collect();
+    let out = run_capture(&prog, &arg_refs)
+        .ok_or_else(|| EngineError::new("tool_failed", "identify could not read this image."))?;
+    const SUMMARY_KEYS: &[&str] = &[
+        "Geometry", "Colorspace", "Type", "Depth", "Compression", "Quality", "Filesize",
+        "Number pixels", "Comment", "comment",
+    ];
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for line in out.lines() {
+        let line = line.trim();
+        // ImageMagick verbose properties are "key: value"; property keys
+        // themselves may contain ':' (exif:Make, date:create), so split
+        // on the colon+space separator, once.
+        let Some((key, value)) = line.split_once(": ") else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let lower = key.to_lowercase();
+        let interesting = lower.starts_with("exif:")
+            || lower.starts_with("png:")
+            || lower.starts_with("jpeg:")
+            || lower.starts_with("xmp:")
+            || lower.starts_with("iptc:")
+            || lower.starts_with("date:")
+            || key.starts_with("Profile-")
+            || SUMMARY_KEYS.contains(&key);
+        if !interesting {
+            continue;
+        }
+        if entries.iter().any(|(k, _)| k == key) {
+            continue;
+        }
+        entries.push((key.to_string(), value.to_string()));
+        if entries.len() >= 80 {
+            break;
+        }
+    }
+    if entries.is_empty() {
+        entries.push(("Format".into(), extension_of(path).to_uppercase()));
+    }
+    Ok(entries)
+}
 
 pub fn tool_report(tools: &Tools) -> HashMap<String, String> {
     let mut m = HashMap::new();
@@ -2388,6 +3567,22 @@ pub fn tool_report(tools: &Tools) -> HashMap<String, String> {
         "pdfinfo".into(),
         tools
             .pdfinfo
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "MISSING".into()),
+    );
+    m.insert(
+        "ghostscript".into(),
+        tools
+            .ghostscript
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "MISSING".into()),
+    );
+    m.insert(
+        "pdfunite".into(),
+        tools
+            .pdfunite
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "MISSING".into()),
@@ -2581,5 +3776,48 @@ mod tests {
     #[test]
     fn subtitle_empty_is_an_honest_error() {
         assert!(subtitle_convert("no cues here", "vtt").is_err());
+    }
+
+    #[test]
+    fn stage4_tool_catalogue() {
+        let img = tool_ids_for(Path::new("a.png"), false);
+        assert!(img.contains(&TOOL_CROP) && img.contains(&TOOL_ANNOTATE));
+        assert!(img.contains(&TOOL_METADATA) && img.contains(&TOOL_COMPRESS_IMAGE));
+        let vid = tool_ids_for(Path::new("a.mp4"), false);
+        assert_eq!(vid, vec![TOOL_TRIM, TOOL_METADATA]);
+        let pdf = tool_ids_for(Path::new("a.pdf"), false);
+        assert!(pdf.contains(&TOOL_PDF_REDACT) && pdf.contains(&TOOL_PDF_MERGE));
+        assert!(tool_ids_for(Path::new("a.docx"), false).is_empty());
+        assert!(tool_ids_for(Path::new("a.zip"), false).is_empty());
+    }
+
+    #[test]
+    fn stage4_page_ranges_parse() {
+        assert_eq!(
+            parse_page_ranges("1-3,5, 8-9").unwrap(),
+            vec![[1, 3], [5, 5], [8, 9]]
+        );
+        assert_eq!(parse_page_ranges("7").unwrap(), vec![[7, 7]]);
+        assert!(parse_page_ranges("0-2").is_err());
+        assert!(parse_page_ranges("4-2").is_err());
+        assert!(parse_page_ranges("x").is_err());
+        assert!(parse_page_ranges("").is_err());
+        assert_eq!(ranges_page_total(&[[1, 3], [5, 5]]), 4);
+    }
+
+    #[test]
+    fn stage4_color_validation() {
+        assert!(valid_color("#C9A227"));
+        assert!(valid_color("white"));
+        assert!(!valid_color("#12345"));
+        assert!(!valid_color("#GGGGGG"));
+        assert!(!valid_color("url(evil)"));
+        assert!(!valid_color("red;rm"));
+    }
+
+    #[test]
+    fn stage4_draw_text_escaping() {
+        assert_eq!(escape_draw_text("it's \\ ok"), "it\\'s \\\\ ok");
+        assert_eq!(escape_draw_text("plain"), "plain");
     }
 }

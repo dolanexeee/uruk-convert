@@ -197,36 +197,81 @@ says so in the result).
 
 ---
 
-## Advanced tools — 26 (reference count)
+## Advanced tools — ours (Stage 4, shipped with tests)
 
-The reference's public site names only five tools explicitly; the
-remaining 21 are not individually enumerated in its public materials
-and will be catalogued from the shipping app in a later research pass.
-We list what is named — and nothing we cannot verify.
+The reference markets "26 advanced tools" but does not publicly
+enumerate them: its site names only a handful (Compress, Crop, Trim,
+Split, Merge, plus metadata removal, redaction and annotation in its
+press material). **No equivalence with the 26 is claimed.** The list
+below is exactly what Uruk Convert ships — every tool is a real
+engine-core transformation with an automated fixture test
+(`npm run test:engine`, Stage 4 section), and every one is reachable
+from the tools wheel (Shift+Alt by default) with a floating HUD
+panel, as well as recorded in history with origin `overlay`.
 
-- [x] **Compress** (images: percentage + target-size modes)
-- [ ] Crop
-- [ ] Trim (video/audio)
-- [ ] Split
-- [ ] Merge
-- [ ] 21 further tools — to be enumerated from the reference app
+Images:
+- [x] **Crop** — panel with X/Y/W/H + aspect chips (Free, 1:1, 4:3,
+  3:2, 16:9); output re-probed at the exact requested size
+- [x] **Resize** — W/H with keep-aspect toggle
+- [x] **Rotate / Flip** — 0/90/180/270 + horizontal/vertical flip
+- [x] **Add Background** — flatten transparency onto a chosen colour
+  (alpha fixture proven: corner pixel becomes the chosen colour)
+- [x] **Annotate** — rectangles, arrows and a text label drawn on a
+  panel canvas over a live preview, rendered in the URUK gold
+- [x] **Metadata** — view (identify/pdfinfo/ffprobe) **and Strip**
+  for images; the strip test plants a hand-built EXIF APP1 block
+  (Make/Model) + comment in a fixture and proves both are gone after
+- [x] **Compress** — percentage tiers (wired into the wheel; the
+  converter's target-size mode also remains)
 
-## File actions — 6
+Video / Audio:
+- [x] **Trim** — start/end panel; stream-copy when the cut starts
+  at 0 (proven: re-encode-free tail trim), honest re-encode
+  otherwise. Audio normalize was evaluated and **not shipped** —
+  no padding.
 
-Reference actions, with our cross-platform equivalents:
+PDF:
+- [x] **Split** — page-range panel (`1-3,5`), one output per range
+- [x] **Extract pages** — ranges merged into a single output
+- [x] **Merge** — multi-file drop onto the tools wheel's Merge
+  segment (pdfunite)
+- [x] **Rotate pages** — per-page pdfmark rotation via Ghostscript;
+  `pdfinfo` proves `Page rot: 90/270` and the text layer survives
+- [x] **Compress PDF** — Ghostscript tiers (screen/ebook/printer);
+  proven smaller on a 1600×1200 raster fixture
+- [x] **Redact** — draw regions on a rendered page preview (pager
+  for multi-page files). Affected pages are rebuilt from a 300 dpi
+  render with the regions burned in, so **the underlying text is
+  actually removed**: the fixture test plants `SECRETREDACT` on
+  page 1 and proves `pdftotext` no longer finds it, while text on
+  unredacted pages survives. The history/toast note discloses the
+  image-rebuild of redacted pages. (A paint-over route was rejected:
+  it would leave the text extractable and does not ship.)
 
-- [ ] AirDrop → system share sheet / quick-send (Windows Nearby Share,
-  Linux Warpinator-style share, macOS AirDrop)
-- [ ] Float → floating preview window pinned above other apps
-- [ ] Copy (duplicate in place)
-- [ ] Move (to a chosen folder)
-- [ ] Copy Path (to clipboard)
-- [ ] Terminal → open a terminal in the file's folder
+Documents / Archives: no fake tools added — archive extraction
+already exists as a conversion.
 
-Shipped extras (not reference items):
+## File actions — ours (Stage 4, shipped)
 
-- [x] Reveal in folder (Explorer / Finder / Files)
-- [x] Open with the OS default application
+Summoned with Control by default (configurable). The reference's
+sixth action adjacent to these is its "Float" preview pin, which we
+do not ship; AirDrop itself is Apple-only — see the per-platform
+table.
+
+- [x] **Copy file** — to the system clipboard as a file object
+  (X11 `text/uri-list` + gnome-copied-files; Windows `CF_HDROP`;
+  macOS `NSPasteboard` file URLs, pending CI proof)
+- [x] **Copy path** — to the clipboard as text (**proven in the X11
+  E2E**: clipboard content asserted equal to the fixture path)
+- [x] **Move to…** — HUD panel with a destination field; name
+  collisions get ` (n)` suffixes, never an overwrite
+- [x] **Reveal in folder** — Explorer / Finder / Files
+- [x] **Open terminal here** — the platform terminal in the file's
+  folder
+- [x] **Share** — macOS only (system share sheet,
+  `NSSharingServicePicker`, pending CI proof). Linux and Windows
+  have no wired system share sheet in this build, so the segment is
+  **not offered there** rather than faked.
 
 ## Core experience
 
@@ -280,8 +325,16 @@ Shipped extras (not reference items):
 - [x] Conversion queue: per-file progress, cancel, plain-language errors
 - [x] Output next to the source (`name.converted.ext`) or to a chosen
   folder; never overwrites the source
+- [x] **Three wheels, one gesture (Stage 4).** Mid-drag chords pick
+  the wheel through one shared rule on every platform: summon key
+  (Shift default) → convert wheel; summon + tools key (Alt default)
+  → tools wheel; actions key (Control default, alone) → actions
+  wheel. Changing the chord under a live wheel swaps the wheel.
+  Tools open floating HUD panels (one shared panel framework +
+  renderer reused by every platform's native host window).
 - [x] Settings: output folder, name suffix, image quality, language,
-  summon modifier (Shift/Control/Alt), autostart, sensing on/off —
+  summon modifier, tools-wheel key, actions-wheel key (each
+  Shift/Control/Alt), autostart, sensing on/off —
   persisted Rust-side so the global overlay and window jobs share one
   output policy; conversion history persisted Rust-side (window +
   overlay origins) and shown in the window
@@ -359,3 +412,36 @@ Shipped extras (not reference items):
   neither global exists → fallback drop window + honest note. No
   Wayland path can summon mid-drag; that is a protocol limit, not an
   implementation gap.
+
+## Platform notes (Stage 4 — tools/actions wheels + HUD panels)
+
+- **X11 (proven in-app, extended E2E)**: the three wheels ride the
+  Stage-3 sensor (modifier state read from `query_pointer` on every
+  poll; a chord change under a live wheel dismisses and re-summons
+  the new kind). The HUD panel is a native override-redirect window
+  (`Uruk Convert Panel`) with a keyboard grab, fed by the shared
+  panel state machine; clipboard actions are served by the sensor
+  owning the CLIPBOARD selection. `qa/x11-e2e/run-e2e.sh` now runs
+  three scenarios — convert (Stage-3, unchanged), **tools**: drag →
+  Shift+Alt → Crop → panel driven by synthetic key/click events →
+  cropped PNG on disk at exactly the panel's 100×80, history target
+  `crop`; **actions**: drag → Control → Copy path → the X clipboard
+  asserted equal to the fixture path. All assertions pass (see
+  REPORT-STAGE-4.md).
+- **macOS / Windows (implemented, pending CI proof — same status as
+  their Stage-3 sensors)**: both sensors speak the same chord rule,
+  dispatch tool/action drops through the same events, execute
+  copy-file/copy-path natively (NSPasteboard / CF_HDROP +
+  CF_UNICODETEXT), and host the shared panel framework (macOS:
+  pre-created `NSPanel` fed through the event tap; Windows: a
+  dedicated `UrukConvertPanel` window class with real keyboard
+  focus). macOS additionally wires the Share segment to
+  `NSSharingServicePicker`. Both type-check
+  (`aarch64`/`x86_64-apple-darwin`, `x86_64-pc-windows-gnu`,
+  including test code); neither is runtime-proven — no Mac or
+  Windows machine exists in this build environment, and Stage 5's
+  CI matrix is where that proof runs.
+- **Wayland**: unchanged orb tier — no wheels exist there (the
+  compositor ban on bystander drag observation covers tools and
+  actions too); the fallback window keeps the full converter, and
+  the engine tools remain available to any future surface.

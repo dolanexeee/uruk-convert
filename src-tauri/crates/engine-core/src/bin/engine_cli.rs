@@ -16,7 +16,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use uruk_engine_core::{analyze, run_job, tool_report, JobSpec, Tools};
+use uruk_engine_core::{analyze, read_metadata, run_job, tool_report, JobSpec, Tools};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -33,6 +33,18 @@ fn main() {
             let path = PathBuf::from(args.get(2).expect("path required"));
             let info = analyze(&tools, &path);
             println!("{}", serde_json::to_string_pretty(&info).unwrap());
+        }
+        "metadata" => {
+            let path = PathBuf::from(args.get(2).expect("path required"));
+            match read_metadata(&tools, &path) {
+                Ok(entries) => {
+                    println!("{}", serde_json::to_string_pretty(&entries).unwrap());
+                }
+                Err(e) => {
+                    println!("ERROR {} {}", e.code, e.message);
+                    std::process::exit(3);
+                }
+            }
         }
         "run" => {
             let job_path = args.get(2).expect("job json path required");

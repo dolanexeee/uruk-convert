@@ -476,6 +476,36 @@ export default function App() {
             </div>
           </div>
           <div className="setting-row">
+            <label>{t.toolsKey}</label>
+            <div className="setting-controls">
+              <select
+                className="target-select"
+                value={agent?.tools_modifier ?? "alt"}
+                onChange={(e) => updateAgent({ tools_modifier: e.target.value })}
+                aria-label={t.toolsKey}
+              >
+                <option value="alt">{t.keyAlt}</option>
+                <option value="control">{t.keyControl}</option>
+                <option value="shift">{t.keyShift}</option>
+              </select>
+            </div>
+          </div>
+          <div className="setting-row">
+            <label>{t.actionsKey}</label>
+            <div className="setting-controls">
+              <select
+                className="target-select"
+                value={agent?.actions_modifier ?? "control"}
+                onChange={(e) => updateAgent({ actions_modifier: e.target.value })}
+                aria-label={t.actionsKey}
+              >
+                <option value="control">{t.keyControl}</option>
+                <option value="alt">{t.keyAlt}</option>
+                <option value="shift">{t.keyShift}</option>
+              </select>
+            </div>
+          </div>
+          <div className="setting-row">
             <label>{t.autostart}</label>
             <input
               type="checkbox"

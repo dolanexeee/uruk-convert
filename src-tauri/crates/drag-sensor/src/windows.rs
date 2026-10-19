@@ -61,7 +61,10 @@
 
 use std::sync::mpsc::{Receiver, Sender};
 
-use crate::{DragSensor, SensorCommand, SensorConfig, SensorError, SensorEvent, WheelResolver};
+use crate::{
+    chord_for, DragSensor, HeldMods, SensorCommand, SensorConfig, SensorError, SensorEvent,
+    SensorLang, SummonModifier, WheelKind, WheelResolver,
+};
 
 // ---------------------------------------------------------------------------
 // Pure logic: DROPFILES (CF_HDROP) parsing
@@ -165,8 +168,10 @@ pub enum HookRecord {
         x: i32,
         y: i32,
     },
-    /// Edge (not auto-repeat) of the configured summon modifier.
-    ModifierDown,
+    /// The held-modifier set changed (an edge of any of Shift /
+    /// Control / Alt, press or release). The tracker maps the set to
+    /// a wheel kind through the shared chord rule.
+    Chord(HeldMods),
     /// Edge of Escape.
     EscapeDown,
 }
@@ -176,8 +181,11 @@ pub enum HookRecord {
 pub enum GestureOutput {
     /// Press + threshold crossed: a drag candidate exists at `(x, y)`.
     Candidate { x: i32, y: i32 },
-    /// Modifier tapped while a candidate is live: summon at `(x, y)`.
-    Summon { x: i32, y: i32 },
+    /// A summon chord appeared while a candidate is live: summon the
+    /// `kind` wheel at `(x, y)`.
+    Summon { x: i32, y: i32, kind: WheelKind },
+    /// The chord changed under a live wheel: swap it for `kind`.
+    Resummon { x: i32, y: i32, kind: WheelKind },
     /// Escape while summoned: hide + revoke + `DragEnded`, and suppress
     /// any further summon for the rest of this drag.
     EscapeCancel,
@@ -206,11 +214,25 @@ pub struct GestureTracker {
     state: GestureState,
     origin: (i32, i32),
     last: (i32, i32),
+    config: SensorConfig,
+    summon_kind: Option<WheelKind>,
 }
 
 impl Default for GestureTracker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The chord configuration the tracker starts with (the app pushes
+/// the live one via `set_config`).
+pub fn default_sensor_config() -> SensorConfig {
+    SensorConfig {
+        modifier: SummonModifier::Shift,
+        tools_modifier: SummonModifier::Alt,
+        actions_modifier: SummonModifier::Control,
+        lang: SensorLang::Ar,
+        enabled: true,
     }
 }
 
@@ -220,7 +242,13 @@ impl GestureTracker {
             state: GestureState::Idle,
             origin: (0, 0),
             last: (0, 0),
+            config: default_sensor_config(),
+            summon_kind: None,
         }
+    }
+
+    pub fn set_config(&mut self, config: &SensorConfig) {
+        self.config = config.clone();
     }
 
     pub fn is_summoned(&self) -> bool {
@@ -252,16 +280,35 @@ impl GestureTracker {
                 }
                 None
             }
-            HookRecord::ModifierDown => match self.state {
-                GestureState::Candidate => {
-                    self.state = GestureState::Summoned;
-                    Some(GestureOutput::Summon {
-                        x: self.last.0,
-                        y: self.last.1,
-                    })
+            HookRecord::Chord(held) => {
+                let kind = chord_for(held, &self.config);
+                match self.state {
+                    GestureState::Candidate => match kind {
+                        Some(k) => {
+                            self.state = GestureState::Summoned;
+                            self.summon_kind = Some(k);
+                            Some(GestureOutput::Summon {
+                                x: self.last.0,
+                                y: self.last.1,
+                                kind: k,
+                            })
+                        }
+                        None => None,
+                    },
+                    GestureState::Summoned => match kind {
+                        Some(k) if Some(k) != self.summon_kind => {
+                            self.summon_kind = Some(k);
+                            Some(GestureOutput::Resummon {
+                                x: self.last.0,
+                                y: self.last.1,
+                                kind: k,
+                            })
+                        }
+                        _ => None,
+                    },
+                    _ => None,
                 }
-                _ => None,
-            },
+            }
             HookRecord::EscapeDown => match self.state {
                 GestureState::Summoned => {
                     self.state = GestureState::Suppressed;
@@ -278,6 +325,7 @@ impl GestureTracker {
             },
             HookRecord::LeftButtonUp { x, y } => {
                 self.last = (x, y);
+                self.summon_kind = None;
                 match self.state {
                     GestureState::Idle => None,
                     GestureState::Suppressed => {
@@ -384,11 +432,17 @@ mod imp {
     use windows_sys::Win32::System::Com::{
         DVASPECT_CONTENT, DVTARGETDEVICE, FORMATETC, STGMEDIUM, TYMED_HGLOBAL,
     };
+    use windows_sys::Win32::Foundation::GlobalFree;
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    use windows_sys::Win32::System::Memory::{
+        GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
+    };
     use windows_sys::Win32::System::Ole::{
         OleInitialize, OleUninitialize, RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop,
-        CF_HDROP, DROPEFFECT_COPY, DROPEFFECT_NONE,
+        CF_HDROP, CF_UNICODETEXT, DROPEFFECT_COPY, DROPEFFECT_NONE,
     };
     use windows_sys::Win32::System::Registry::{
         RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW, HKEY,
@@ -398,18 +452,21 @@ mod imp {
         SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        VK_CONTROL, VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_MENU, VK_RCONTROL, VK_RMENU,
-        VK_RSHIFT, VK_SHIFT,
+        ReleaseCapture, SetCapture, SetFocus, VK_BACK, VK_CONTROL, VK_DELETE, VK_END, VK_ESCAPE,
+        VK_HOME, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_MENU, VK_RCONTROL, VK_RETURN,
+        VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_SHIFT, VK_TAB,
     };
     use windows_sys::Win32::UI::Shell::DragQueryFileW;
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
+    use crate::panel::{PanelAction, PanelEvent, PanelKey, PanelState};
     use crate::{
-        SensorCommand, SensorConfig, SensorError, SensorEvent, SummonModifier, Toast, WheelModel,
-        WheelRequest, WheelResolver,
+        HeldMods, PanelOutcome, PanelSpec, SensorCommand, SensorConfig, SensorError, SensorEvent,
+        Toast, WheelKind, WheelModel, WheelRequest, WheelResolver, ACTION_COPY_FILE,
+        ACTION_COPY_PATH,
     };
 
-    use super::{parse_hdrop_auto, GestureOutput, GestureTracker, HookRecord};
+    use super::{parse_hdrop_auto, GestureOutput, GestureTracker, HookRecord, DROPFILES_HEADER_LEN};
 
     const TIMER_ID: usize = 0x5543; // "UC" — the queue-drain timer.
     const WM_URUK_HANDBACK: u32 = WM_APP + 0x31;
@@ -421,9 +478,9 @@ mod imp {
     // atomics. Everything else happens on the sensor thread.
 
     static HOOK_QUEUE: Mutex<VecDeque<HookRecord>> = Mutex::new(VecDeque::new());
-    /// Configured summon modifier: 0 = Shift, 1 = Control, 2 = Alt.
-    static MODIFIER_KIND: AtomicU8 = AtomicU8::new(0);
-    static MODIFIER_HELD: AtomicBool = AtomicBool::new(false);
+    static SHIFT_HELD: AtomicBool = AtomicBool::new(false);
+    static CTRL_HELD: AtomicBool = AtomicBool::new(false);
+    static ALT_HELD: AtomicBool = AtomicBool::new(false);
     static ESC_HELD: AtomicBool = AtomicBool::new(false);
     static LEFT_HELD: AtomicBool = AtomicBool::new(false);
     /// *mut SensorCore as usize (the core is pinned in a Box on the
@@ -437,24 +494,35 @@ mod imp {
         }
     }
 
-    fn modifier_kind(m: SummonModifier) -> u8 {
-        match m {
-            SummonModifier::Shift => 0,
-            SummonModifier::Control => 1,
-            SummonModifier::Alt => 2,
+    /// Which modifier family a virtual-key code belongs to:
+    /// 0 = Shift, 1 = Control, 2 = Alt (Menu).
+    fn vk_modifier_slot(vk: u32) -> Option<usize> {
+        if vk == VK_SHIFT as u32 || vk == VK_LSHIFT as u32 || vk == VK_RSHIFT as u32 {
+            Some(0)
+        } else if vk == VK_CONTROL as u32 || vk == VK_LCONTROL as u32 || vk == VK_RCONTROL as u32
+        {
+            Some(1)
+        } else if vk == VK_MENU as u32 || vk == VK_LMENU as u32 || vk == VK_RMENU as u32 {
+            Some(2)
+        } else {
+            None
         }
     }
 
-    fn vk_matches_modifier(kind: u8, vk: u32) -> bool {
-        match kind {
-            0 => vk == VK_SHIFT as u32 || vk == VK_LSHIFT as u32 || vk == VK_RSHIFT as u32,
-            1 => vk == VK_CONTROL as u32 || vk == VK_LCONTROL as u32 || vk == VK_RCONTROL as u32,
-            _ => vk == VK_MENU as u32 || vk == VK_LMENU as u32 || vk == VK_RMENU as u32,
+    fn held_mods() -> HeldMods {
+        HeldMods {
+            shift: SHIFT_HELD.load(Ordering::SeqCst),
+            control: CTRL_HELD.load(Ordering::SeqCst),
+            alt: ALT_HELD.load(Ordering::SeqCst),
         }
     }
 
-    fn vk_is_any_modifier(vk: u32) -> bool {
-        vk_matches_modifier(0, vk) || vk_matches_modifier(1, vk) || vk_matches_modifier(2, vk)
+    fn modifier_atomic(slot: usize) -> &'static AtomicBool {
+        match slot {
+            0 => &SHIFT_HELD,
+            1 => &CTRL_HELD,
+            _ => &ALT_HELD,
+        }
     }
 
     // -- Low-level hook callbacks (near-empty by contract) -----------------
@@ -510,17 +578,21 @@ mod imp {
                         if !ESC_HELD.swap(true, Ordering::SeqCst) {
                             push_record(HookRecord::EscapeDown);
                         }
-                    } else if vk_matches_modifier(MODIFIER_KIND.load(Ordering::SeqCst), vk)
-                        && !MODIFIER_HELD.swap(true, Ordering::SeqCst)
-                    {
-                        push_record(HookRecord::ModifierDown);
+                    } else if let Some(slot) = vk_modifier_slot(vk) {
+                        // Edge per family: auto-repeat must not
+                        // re-fire; the record carries the full set.
+                        if !modifier_atomic(slot).swap(true, Ordering::SeqCst) {
+                            push_record(HookRecord::Chord(held_mods()));
+                        }
                     }
                 }
                 WM_KEYUP | WM_SYSKEYUP => {
                     if vk == VK_ESCAPE as u32 {
                         ESC_HELD.store(false, Ordering::SeqCst);
-                    } else if vk_is_any_modifier(vk) {
-                        MODIFIER_HELD.store(false, Ordering::SeqCst);
+                    } else if let Some(slot) = vk_modifier_slot(vk) {
+                        if modifier_atomic(slot).swap(false, Ordering::SeqCst) {
+                            push_record(HookRecord::Chord(held_mods()));
+                        }
                     }
                 }
                 _ => {}
@@ -604,6 +676,60 @@ mod imp {
         ReleaseDC(null_mut(), screen_dc);
     }
 
+    // -- Clipboard (Stage 4 file actions) ------------------------------
+
+    /// Put a raw blob on the clipboard under `format`, transferring
+    /// ownership of the HGLOBAL to the system on success.
+    unsafe fn set_clipboard_data(format: u32, bytes: &[u8]) {
+        let h = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1));
+        if h.is_null() {
+            return;
+        }
+        let ptr = GlobalLock(h);
+        if ptr.is_null() {
+            GlobalFree(h);
+            return;
+        }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
+        GlobalUnlock(h);
+        if OpenClipboard(null_mut()) != 0 {
+            EmptyClipboard();
+            if SetClipboardData(format, h).is_null() {
+                GlobalFree(h);
+            }
+            CloseClipboard();
+        } else {
+            GlobalFree(h);
+        }
+    }
+
+    /// Copy file: a `CF_HDROP` DROPFILES blob (wide, double-NUL list).
+    unsafe fn set_clipboard_hdrop(paths: &[std::path::PathBuf]) {
+        let mut blob: Vec<u8> = Vec::new();
+        blob.extend_from_slice(&(DROPFILES_HEADER_LEN as u32).to_le_bytes());
+        blob.extend_from_slice(&[0u8; 8]); // pt
+        blob.extend_from_slice(&0u32.to_le_bytes()); // fNonClient
+        blob.extend_from_slice(&1u32.to_le_bytes()); // fWide
+        for p in paths {
+            for u in p.display().to_string().encode_utf16() {
+                blob.extend_from_slice(&u.to_le_bytes());
+            }
+            blob.extend_from_slice(&0u16.to_le_bytes());
+        }
+        blob.extend_from_slice(&0u16.to_le_bytes());
+        set_clipboard_data(CF_HDROP as u32, &blob);
+    }
+
+    /// Copy path: `CF_UNICODETEXT`.
+    unsafe fn set_clipboard_text(text: &str) {
+        let mut bytes: Vec<u8> = Vec::new();
+        for u in text.encode_utf16() {
+            bytes.extend_from_slice(&u.to_le_bytes());
+        }
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        set_clipboard_data(CF_UNICODETEXT as u32, &bytes);
+    }
+
     unsafe fn ensure_classes(hinst: windows_sys::Win32::Foundation::HINSTANCE) {
         if CLASSES_DONE.swap(true, Ordering::SeqCst) {
             return;
@@ -628,6 +754,87 @@ mod imp {
             };
             // 0 with ERROR_CLASS_ALREADY_EXISTS is fine (idempotent).
             let _ = RegisterClassExW(&wc);
+        }
+        // Stage 4: the HUD panel has its own proc (it takes real
+        // mouse + keyboard input, unlike the click-through overlays).
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(panel_wndproc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: hinst,
+            hIcon: null_mut(),
+            hCursor: null_mut(),
+            hbrBackground: null_mut(),
+            lpszMenuName: null(),
+            lpszClassName: windows_sys::w!("UrukConvertPanel"),
+            hIconSm: null_mut(),
+        };
+        let _ = RegisterClassExW(&wc);
+    }
+
+    unsafe extern "system" fn panel_wndproc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        fn lp_xy(lparam: LPARAM) -> (f32, f32) {
+            let x = (lparam & 0xFFFF) as i16 as i32;
+            let y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
+            (x as f32, y as f32)
+        }
+        match msg {
+            WM_LBUTTONDOWN => {
+                let (x, y) = lp_xy(lparam);
+                SetCapture(hwnd);
+                with_core(|core| core.panel_event(PanelEvent::Down { x, y }));
+                0
+            }
+            WM_MOUSEMOVE => {
+                if wparam & 0x0001 != 0 {
+                    let (x, y) = lp_xy(lparam);
+                    with_core(|core| core.panel_event(PanelEvent::Move { x, y }));
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_LBUTTONUP => {
+                let (x, y) = lp_xy(lparam);
+                with_core(|core| core.panel_event(PanelEvent::Up { x, y }));
+                ReleaseCapture();
+                0
+            }
+            WM_CHAR => {
+                if let Some(c) = char::from_u32(wparam as u32) {
+                    if !c.is_control() {
+                        with_core(|core| core.panel_event(PanelEvent::Key(PanelKey::Char(c))));
+                    }
+                }
+                0
+            }
+            WM_KEYDOWN => {
+                let key = match wparam as u32 {
+                    v if v == VK_ESCAPE as u32 => Some(PanelKey::Escape),
+                    v if v == VK_RETURN as u32 => Some(PanelKey::Enter),
+                    v if v == VK_TAB as u32 => Some(PanelKey::Tab),
+                    v if v == VK_BACK as u32 => Some(PanelKey::Backspace),
+                    v if v == VK_DELETE as u32 => Some(PanelKey::Delete),
+                    v if v == VK_LEFT as u32 => Some(PanelKey::Left),
+                    v if v == VK_RIGHT as u32 => Some(PanelKey::Right),
+                    v if v == VK_HOME as u32 => Some(PanelKey::Home),
+                    v if v == VK_END as u32 => Some(PanelKey::End),
+                    _ => None,
+                };
+                match key {
+                    Some(k) => {
+                        with_core(|core| core.panel_event(PanelEvent::Key(k)));
+                        0
+                    }
+                    None => DefWindowProcW(hwnd, msg, wparam, lparam),
+                }
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
     }
 
@@ -976,12 +1183,21 @@ mod imp {
         toast_hwnd: HWND,
         toast_until: Option<Instant>,
         shutdown: bool,
+
+        // Stage 4.
+        /// Wheel kind the current chord selected (set at summon).
+        pending_kind: WheelKind,
+        panel_hwnd: HWND,
+        panel_state: Option<PanelState>,
+        panel_preview: Option<tiny_skia::Pixmap>,
+        panel_pos: (i32, i32),
     }
 
     fn generic_model() -> WheelModel {
         // Hub-only wheel painted between summon and DragEnter: we know
         // a drag exists, not yet what it carries.
         WheelModel {
+            kind: WheelKind::Convert,
             segments: Vec::new(),
             hub_ext: "FILE".to_string(),
             hub_title: String::new(),
@@ -999,10 +1215,30 @@ mod imp {
                         self.shutdown = true;
                     }
                     Ok(SensorCommand::UpdateConfig(cfg)) => {
-                        MODIFIER_KIND.store(modifier_kind(cfg.modifier), Ordering::SeqCst);
+                        self.gesture.set_config(&cfg);
                         self.config = cfg;
                     }
                     Ok(SensorCommand::ShowToast(toast)) => self.show_toast(toast),
+                    Ok(SensorCommand::ShowPanel(spec)) => {
+                        // Replacing an open panel closes it as Cancelled.
+                        if let Some(old) = self.panel_state.take() {
+                            let _ = self.events.send(SensorEvent::PanelClosed {
+                                id: old.spec.id.clone(),
+                                outcome: PanelOutcome::Cancelled,
+                            });
+                        }
+                        self.panel_preview = None;
+                        self.destroy_panel_window();
+                        self.show_panel(spec);
+                    }
+                    Ok(SensorCommand::UpdatePanelCanvas { id, image_png, page, pages }) => {
+                        self.update_panel_canvas(&id, &image_png, page, pages);
+                    }
+                    Ok(SensorCommand::ClosePanel { .. }) => {
+                        self.panel_state = None;
+                        self.panel_preview = None;
+                        self.destroy_panel_window();
+                    }
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         // Host is gone; an agent with no host should exit.
@@ -1047,9 +1283,38 @@ mod imp {
         unsafe fn on_gesture_output(&mut self, out: GestureOutput) {
             match out {
                 GestureOutput::Candidate { .. } => {}
-                GestureOutput::Summon { x, y } => {
-                    if self.config.enabled && !self.summoned {
+                GestureOutput::Summon { x, y, kind } => {
+                    self.pending_kind = kind;
+                    if self.config.enabled && !self.summoned && self.panel_state.is_none() {
                         self.show_overlay(x, y);
+                    }
+                }
+                GestureOutput::Resummon { kind, .. } => {
+                    self.pending_kind = kind;
+                    if self.summoned && self.participating && !self.paths.is_empty() {
+                        // Paths are known: re-resolve in place for the
+                        // new wheel kind.
+                        let request = WheelRequest {
+                            kind,
+                            paths: self.paths.clone(),
+                            mime_types: vec!["CF_HDROP".to_string()],
+                        };
+                        match (self.resolve)(&request) {
+                            Some(model) => {
+                                self.model = Some(model);
+                                self.hover = None;
+                                self.repaint_wheel();
+                            }
+                            None => self.dismiss_overlay(),
+                        }
+                    } else if self.summoned {
+                        // Nothing classified yet: restart the overlay;
+                        // OLE re-enters when the drag next moves.
+                        let (cx, cy) = self.wheel_centre;
+                        self.dismiss_overlay();
+                        if self.config.enabled {
+                            self.show_overlay(cx, cy);
+                        }
                     }
                 }
                 GestureOutput::EscapeCancel => {
@@ -1212,6 +1477,7 @@ mod imp {
                 return;
             }
             let request = WheelRequest {
+                kind: self.pending_kind,
                 paths: paths.clone(),
                 mime_types: vec!["CF_HDROP".to_string()],
             };
@@ -1267,13 +1533,62 @@ mod imp {
                             paths = self.paths.clone();
                         }
                         if !paths.is_empty() {
-                            let target = model.segments[i].clone();
-                            let _ = self
-                                .events
-                                .send(SensorEvent::ConvertRequested { paths, target });
-                            self.converted = true;
-                            converted_now = true;
-                            *effect = DROPEFFECT_COPY;
+                            let segment = model.segments[i].clone();
+                            let dispatched = match model.kind {
+                                WheelKind::Convert => {
+                                    let _ = self.events.send(SensorEvent::ConvertRequested {
+                                        paths: paths.clone(),
+                                        target: segment.id.clone(),
+                                    });
+                                    true
+                                }
+                                WheelKind::Tools => {
+                                    let _ = self.events.send(SensorEvent::ToolRequested {
+                                        paths: paths.clone(),
+                                        tool: segment.id.clone(),
+                                        x: pt.x,
+                                        y: pt.y,
+                                    });
+                                    true
+                                }
+                                WheelKind::Actions => {
+                                    if segment.id == ACTION_COPY_FILE {
+                                        set_clipboard_hdrop(&paths);
+                                        let _ = self.events.send(SensorEvent::ActionDone {
+                                            paths: paths.clone(),
+                                            action: segment.id.clone(),
+                                        });
+                                        true
+                                    } else if segment.id == ACTION_COPY_PATH {
+                                        let text = paths
+                                            .iter()
+                                            .map(|p| p.display().to_string())
+                                            .collect::<Vec<_>>()
+                                            .join("\r\n");
+                                        set_clipboard_text(&text);
+                                        let _ = self.events.send(SensorEvent::ActionDone {
+                                            paths: paths.clone(),
+                                            action: segment.id.clone(),
+                                        });
+                                        true
+                                    } else {
+                                        let _ = self.events.send(
+                                            SensorEvent::ActionRequested {
+                                                paths: paths.clone(),
+                                                action: segment.id.clone(),
+                                                x: pt.x,
+                                                y: pt.y,
+                                            },
+                                        );
+                                        true
+                                    }
+                                }
+                            };
+                            if dispatched {
+                                self.converted = true;
+                                converted_now = true;
+                                *effect = DROPEFFECT_COPY;
+                            }
                         }
                     }
                 }
@@ -1353,6 +1668,140 @@ mod imp {
             }
             self.toast_until = None;
         }
+
+        // -- Stage 4: HUD panel host --
+
+        unsafe fn show_panel(&mut self, spec: PanelSpec) {
+            let state = PanelState::new(spec);
+            let (w, h) = (state.layout.width as i32, state.layout.height as i32);
+            let (ax, ay) = state.spec.anchor;
+            let mut area: RECT = std::mem::zeroed();
+            SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut area as *mut RECT as *mut c_void, 0);
+            let mut x = (ax - 40).max(area.left + 4);
+            if x + w > area.right - 4 {
+                x = (area.right - 4 - w).max(area.left + 4);
+            }
+            let mut y = (ay + 18).max(area.top + 4);
+            if y + h > area.bottom - 4 {
+                y = (area.bottom - 4 - h).max(area.top + 4);
+            }
+            self.panel_preview = state
+                .spec
+                .canvas
+                .as_ref()
+                .and_then(|cv| std::fs::read(&cv.image_png).ok())
+                .and_then(|b| crate::panel::decode_png(&b));
+            self.panel_state = Some(state);
+            self.panel_pos = (x, y);
+            if self.panel_hwnd.is_null() {
+                let hinst = GetModuleHandleW(null());
+                ensure_classes(hinst);
+                let hwnd = CreateWindowExW(
+                    WS_EX_LAYERED | WS_EX_TOPMOST,
+                    windows_sys::w!("UrukConvertPanel"),
+                    null(),
+                    WS_POPUP,
+                    x,
+                    y,
+                    w,
+                    h,
+                    null_mut(),
+                    null_mut(),
+                    hinst,
+                    null(),
+                );
+                if hwnd.is_null() {
+                    self.panel_state = None;
+                    return;
+                }
+                self.panel_hwnd = hwnd;
+            }
+            self.repaint_panel();
+            ShowWindow(self.panel_hwnd, SW_SHOW);
+            SetForegroundWindow(self.panel_hwnd);
+            SetFocus(self.panel_hwnd);
+        }
+
+        unsafe fn repaint_panel(&mut self) {
+            if self.panel_hwnd.is_null() {
+                return;
+            }
+            let pm = match &self.panel_state {
+                Some(st) => crate::panel::render_panel(st, self.panel_preview.as_ref()),
+                None => return,
+            };
+            paint_layered(self.panel_hwnd, &pm, self.panel_pos.0, self.panel_pos.1);
+        }
+
+        unsafe fn destroy_panel_window(&mut self) {
+            if !self.panel_hwnd.is_null() {
+                DestroyWindow(self.panel_hwnd);
+                self.panel_hwnd = null_mut();
+            }
+        }
+
+        unsafe fn update_panel_canvas(
+            &mut self,
+            id: &str,
+            image_png: &std::path::PathBuf,
+            page: u32,
+            pages: u32,
+        ) {
+            let matches = matches!(&self.panel_state, Some(st) if st.spec.id == id);
+            if !matches {
+                return;
+            }
+            if let Some(pm) = std::fs::read(image_png)
+                .ok()
+                .and_then(|b| crate::panel::decode_png(&b))
+            {
+                self.panel_preview = Some(pm);
+            }
+            if let Some(st) = &mut self.panel_state {
+                st.set_canvas_page(page, pages);
+            }
+            self.repaint_panel();
+        }
+
+        /// Feed one input event into the open panel (from panel_wndproc).
+        unsafe fn panel_event(&mut self, ev: PanelEvent) {
+            let action = match &mut self.panel_state {
+                Some(st) => st.handle(ev),
+                None => return,
+            };
+            match action {
+                PanelAction::None => {}
+                PanelAction::Redraw => self.repaint_panel(),
+                PanelAction::NeedPage(page) => {
+                    if let Some(st) = &self.panel_state {
+                        let _ = self.events.send(SensorEvent::PanelPageRequest {
+                            id: st.spec.id.clone(),
+                            page,
+                        });
+                    }
+                }
+                PanelAction::Apply => {
+                    if let Some(st) = self.panel_state.take() {
+                        let outcome = st.outcome();
+                        let id = st.spec.id.clone();
+                        self.panel_preview = None;
+                        self.destroy_panel_window();
+                        let _ = self.events.send(SensorEvent::PanelClosed { id, outcome });
+                    }
+                }
+                PanelAction::Cancel => {
+                    if let Some(st) = self.panel_state.take() {
+                        let id = st.spec.id.clone();
+                        self.panel_preview = None;
+                        self.destroy_panel_window();
+                        let _ = self.events.send(SensorEvent::PanelClosed {
+                            id,
+                            outcome: PanelOutcome::Cancelled,
+                        });
+                    }
+                }
+            }
+        }
     }
 
     // -- Entry points --------------------------------------------------------
@@ -1376,8 +1825,6 @@ mod imp {
                 ));
             }
 
-            MODIFIER_KIND.store(modifier_kind(config.modifier), Ordering::SeqCst);
-
             let mut core = Box::new(SensorCore {
                 config,
                 events,
@@ -1400,7 +1847,13 @@ mod imp {
                 toast_hwnd: null_mut(),
                 toast_until: None,
                 shutdown: false,
+                pending_kind: WheelKind::Convert,
+                panel_hwnd: null_mut(),
+                panel_state: None,
+                panel_preview: None,
+                panel_pos: (0, 0),
             });
+            core.gesture.set_config(&core.config.clone());
             CORE_PTR.store(&mut *core as *mut SensorCore as usize, Ordering::SeqCst);
 
             let hinst = GetModuleHandleW(null());
@@ -1618,6 +2071,13 @@ mod tests {
     }
 
     // -- gesture state machine --
+    /// A Shift-press chord record (the default summon chord).
+    const SHIFT_DOWN: HookRecord = HookRecord::Chord(HeldMods {
+        shift: true,
+        control: false,
+        alt: false,
+    });
+
 
     fn press(t: &mut GestureTracker) {
         assert_eq!(
@@ -1635,8 +2095,8 @@ mod tests {
             Some(GestureOutput::Candidate { x: 130, y: 100 })
         );
         assert_eq!(
-            t.on_record(HookRecord::ModifierDown),
-            Some(GestureOutput::Summon { x: 130, y: 100 })
+            t.on_record(SHIFT_DOWN),
+            Some(GestureOutput::Summon { x: 130, y: 100, kind: WheelKind::Convert })
         );
         assert!(t.is_summoned());
     }
@@ -1646,7 +2106,7 @@ mod tests {
         let mut t = GestureTracker::new();
         press(&mut t);
         assert_eq!(t.on_record(HookRecord::MouseMove { x: 105, y: 103 }), None);
-        assert_eq!(t.on_record(HookRecord::ModifierDown), None);
+        assert_eq!(t.on_record(SHIFT_DOWN), None);
         assert!(!t.is_summoned());
     }
 
@@ -1667,15 +2127,15 @@ mod tests {
     fn modifier_before_threshold_does_not_summon() {
         let mut t = GestureTracker::new();
         press(&mut t);
-        assert_eq!(t.on_record(HookRecord::ModifierDown), None);
+        assert_eq!(t.on_record(SHIFT_DOWN), None);
         assert_eq!(
             t.on_record(HookRecord::MouseMove { x: 150, y: 100 }),
             Some(GestureOutput::Candidate { x: 150, y: 100 })
         );
         // A fresh tap after the candidate exists does summon.
         assert_eq!(
-            t.on_record(HookRecord::ModifierDown),
-            Some(GestureOutput::Summon { x: 150, y: 100 })
+            t.on_record(SHIFT_DOWN),
+            Some(GestureOutput::Summon { x: 150, y: 100, kind: WheelKind::Convert })
         );
     }
 
@@ -1685,15 +2145,15 @@ mod tests {
         press(&mut t);
         t.on_record(HookRecord::MouseMove { x: 140, y: 100 });
         assert_eq!(
-            t.on_record(HookRecord::ModifierDown),
-            Some(GestureOutput::Summon { x: 140, y: 100 })
+            t.on_record(SHIFT_DOWN),
+            Some(GestureOutput::Summon { x: 140, y: 100, kind: WheelKind::Convert })
         );
         assert_eq!(
             t.on_record(HookRecord::EscapeDown),
             Some(GestureOutput::EscapeCancel)
         );
         // Modifier again: suppressed. Button-up: no second terminal event.
-        assert_eq!(t.on_record(HookRecord::ModifierDown), None);
+        assert_eq!(t.on_record(SHIFT_DOWN), None);
         assert_eq!(
             t.on_record(HookRecord::LeftButtonUp { x: 140, y: 100 }),
             None
@@ -1703,8 +2163,8 @@ mod tests {
         press(&mut t);
         t.on_record(HookRecord::MouseMove { x: 140, y: 100 });
         assert_eq!(
-            t.on_record(HookRecord::ModifierDown),
-            Some(GestureOutput::Summon { x: 140, y: 100 })
+            t.on_record(SHIFT_DOWN),
+            Some(GestureOutput::Summon { x: 140, y: 100, kind: WheelKind::Convert })
         );
     }
 
@@ -1720,5 +2180,47 @@ mod tests {
         assert!(!t.is_active());
         // A stray button-up in Idle is ignored.
         assert_eq!(t.on_record(HookRecord::LeftButtonUp { x: 0, y: 0 }), None);
+    }
+    #[test]
+    fn chord_change_under_live_wheel_resummons() {
+        let mut t = GestureTracker::new();
+        press(&mut t);
+        t.on_record(HookRecord::MouseMove { x: 140, y: 100 });
+        assert_eq!(
+            t.on_record(SHIFT_DOWN),
+            Some(GestureOutput::Summon {
+                x: 140,
+                y: 100,
+                kind: WheelKind::Convert
+            })
+        );
+        // Adding Alt upgrades to the tools wheel.
+        assert_eq!(
+            t.on_record(HookRecord::Chord(HeldMods {
+                shift: true,
+                control: false,
+                alt: true
+            })),
+            Some(GestureOutput::Resummon {
+                x: 140,
+                y: 100,
+                kind: WheelKind::Tools
+            })
+        );
+        // Control alone (Shift released first in the same set change
+        // would pass through no-chord; here it arrives as a set with
+        // only Control) selects the actions wheel.
+        assert_eq!(
+            t.on_record(HookRecord::Chord(HeldMods {
+                shift: false,
+                control: true,
+                alt: false
+            })),
+            Some(GestureOutput::Resummon {
+                x: 140,
+                y: 100,
+                kind: WheelKind::Actions
+            })
+        );
     }
 }

@@ -153,6 +153,27 @@ pub fn shift_keycodes(conn: &RustConnection) -> Result<Vec<u8>, Box<dyn std::err
     Ok(out)
 }
 
+/// Find the first keycode whose keysym list contains `keysym`
+/// (used for Alt / Control / Return / BackSpace / digits in XTest
+/// driving).
+pub fn keycode_for_keysym(
+    conn: &RustConnection,
+    keysym: u32,
+) -> Result<Option<u8>, Box<dyn std::error::Error>> {
+    let setup = conn.setup();
+    let first = setup.min_keycode;
+    let count = setup.max_keycode - first + 1;
+    let map = conn.get_keyboard_mapping(first, count)?.reply()?;
+    let per = map.keysyms_per_keycode as usize;
+    for i in 0..count as usize {
+        let syms = &map.keysyms[i * per..(i + 1) * per];
+        if syms.iter().any(|&s| s == keysym) {
+            return Ok(Some(first + i as u8));
+        }
+    }
+    Ok(None)
+}
+
 /// Obtain a plausible current X server timestamp: change a property on our
 /// own window and read the timestamp off the resulting PropertyNotify.
 /// (XConvertSelection / XDND timestamps must not be in the future.)

@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "uruk-convert"
-version = "0.3.0"
+version = "0.4.0"
 description = "Uruk Convert — clean-room, open-source offline file converter (desktop shell)"
 authors = ["URUK contributors"]
 edition = "2021"
