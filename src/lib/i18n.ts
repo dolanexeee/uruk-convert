@@ -54,11 +54,17 @@ const ar = {
   familyAudio: "صوت",
   familyVideo: "فيديو",
   familyArchive: "أرشيف",
+  familyPdf: "PDF",
+  familyDocument: "مستند",
+  familySlides: "عرض تقديمي",
+  familySpreadsheet: "جدول بيانات",
+  familySubtitle: "ترجمة",
   familyUnknown: "ملف",
   errGeneric: "حدث خطأ أثناء التحويل.",
   errToolMissing: "الأداة المطلوبة غير متوفرة في هذه النسخة.",
   errHeic: "تصدير HEIC غير متاح في الأدوات المدمجة على هذا النظام بعد (يمكن فتح ملفات HEIC وتحويلها لصيغ أخرى).",
   errNoAudio: "هذا الفيديو لا يحتوي مسارًا صوتيًا لتصديره كـ MP3.",
+  errPdfSheet: "تحويل PDF إلى جدول بيانات غير متاح: ملف PDF يحتوي نصًا مرسومًا لا خلايا حقيقية، ولا توجد أداة مدمجة تستطيع إعادة بناء الخلايا بصدق.",
   errCancelled: "أُلغي التحويل.",
   aboutLine: "محوّل أوروك — إعادة بناء نظيفة ومفتوحة المصدر، أول تطبيقات ثلاثية أوروك الثانية.",
 };
@@ -117,11 +123,17 @@ const en: typeof ar = {
   familyAudio: "Audio",
   familyVideo: "Video",
   familyArchive: "Archive",
+  familyPdf: "PDF",
+  familyDocument: "Document",
+  familySlides: "Slides",
+  familySpreadsheet: "Spreadsheet",
+  familySubtitle: "Subtitles",
   familyUnknown: "File",
   errGeneric: "Something went wrong during conversion.",
   errToolMissing: "The required tool is not available in this build.",
   errHeic: "HEIC export is not available in the bundled tools on this system yet (HEIC files can still be opened and converted to other formats).",
   errNoAudio: "This video has no audio track to export as MP3.",
+  errPdfSheet: "PDF to spreadsheet is not available: a PDF holds drawn text, not real cells, and no bundled tool can honestly rebuild cells from it.",
   errCancelled: "Conversion cancelled.",
   aboutLine: "Uruk Convert — a clean-room, open-source rebuild; first app of the URUK Trilogy Two.",
 };
@@ -135,6 +147,11 @@ export function familyLabel(lang: Lang, family: string): string {
     case "audio": return t.familyAudio;
     case "video": return t.familyVideo;
     case "archive": return t.familyArchive;
+    case "pdf": return t.familyPdf;
+    case "document": return t.familyDocument;
+    case "slides": return t.familySlides;
+    case "spreadsheet": return t.familySpreadsheet;
+    case "subtitle": return t.familySubtitle;
     default: return t.familyUnknown;
   }
 }
@@ -145,6 +162,7 @@ export function errorLabel(lang: Lang, code: string, fallback: string): string {
     case "tool_missing": return t.errToolMissing;
     case "heic_encode_unavailable": return t.errHeic;
     case "no_audio_stream": return t.errNoAudio;
+    case "pdf_to_spreadsheet_unavailable": return t.errPdfSheet;
     case "cancelled": return t.errCancelled;
     default: return fallback || t.errGeneric;
   }

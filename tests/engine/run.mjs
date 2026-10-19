@@ -29,6 +29,7 @@ const TRIPLE = "x86_64-unknown-linux-gnu";
 const FFMPEG = join(SIDECARS, `uruk-ffmpeg-${TRIPLE}`);
 const FFPROBE = join(SIDECARS, `uruk-ffprobe-${TRIPLE}`);
 const SEVENZ = join(SIDECARS, `uruk-7z-${TRIPLE}`);
+const PANDOC = join(SIDECARS, `uruk-pandoc-${TRIPLE}`);
 const ENGINE = join(ROOT, "src-tauri", "target", "debug", "engine-cli");
 
 const env = {
@@ -105,6 +106,111 @@ must(FFMPEG, [
 mkdirSync(join(FIX, "folder"), { recursive: true });
 writeFileSync(join(FIX, "folder", "a.txt"), "hello uruk\n");
 writeFileSync(join(FIX, "folder", "b.txt"), "second file\n");
+
+// ---------------------------------------------------------------------------
+// Stage 2 fixtures: documents, PDF, slides, spreadsheets, subtitles.
+// Baked with the system tools (pandoc sidecar + LibreOffice + python3) —
+// the engine's own conversions are then re-probed independently below.
+// ---------------------------------------------------------------------------
+console.log("· generating stage-2 fixtures…");
+const LO_PROFILE = `file://${join(WORK, "lo-bake-profile")}`;
+function loBake(convertTo, input, outDir = FIX) {
+  must("soffice", [
+    "--headless", "--norestore", `-env:UserInstallation=${LO_PROFILE}`,
+    "--convert-to", convertTo, "--outdir", outDir, input,
+  ]);
+}
+// A Markdown source with a probe marker, long enough to paginate to ≥2
+// pages once LibreOffice renders it (feeds the multi-page PDF proofs).
+{
+  let md = "# URUKDOC Fixture Title\n\nThis paragraph carries the marker URUKDOC inside a real sentence for probing.\n\n- first bullet\n- second bullet\n\n";
+  for (let i = 1; i <= 110; i++) {
+    md += `Filler line ${i} with enough words to gradually fill pages of rendered output for pagination.\n\n`;
+  }
+  writeFileSync(join(FIX, "doc.md"), md);
+}
+must(PANDOC, [join(FIX, "doc.md"), "-o", join(FIX, "doc.docx")]);
+must(PANDOC, [join(FIX, "doc.md"), "--metadata", "title=URUKDOC", "-o", join(FIX, "doc.epub")]);
+loBake("odt", join(FIX, "doc.docx"));
+loBake("rtf", join(FIX, "doc.docx"));
+loBake("pdf", join(FIX, "doc.docx")); // → doc.pdf (the PDF-family fixture)
+writeFileSync(join(FIX, "notes.txt"), "URUKTXT plain text fixture line\nsecond line of plain text\n");
+writeFileSync(join(FIX, "page.html"), "<!doctype html><html><body><h1>URUKHTML heading</h1><p>URUKHTML body paragraph.</p></body></html>\n");
+// Minimal ODP baked by a small python script (zip of XML parts), then
+// turned into PPTX / PPT fixtures by LibreOffice.
+{
+  const py = [
+    "import zipfile, sys",
+    "content = '''<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+    "<office:document-content xmlns:office=\"urn:oasis:names:tc:opendocument:xmlns:office:1.0\" xmlns:text=\"urn:oasis:names:tc:opendocument:xmlns:text:1.0\" xmlns:draw=\"urn:oasis:names:tc:opendocument:xmlns:drawing:1.0\" xmlns:presentation=\"urn:oasis:names:tc:opendocument:xmlns:presentation:1.0\" xmlns:svg=\"urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0\" office:version=\"1.2\">",
+    "<office:body><office:presentation>",
+    "<draw:page draw:name=\"page1\"><draw:frame draw:name=\"t1\" svg:x=\"1cm\" svg:y=\"1cm\" svg:width=\"20cm\" svg:height=\"3cm\"><draw:text-box><text:p>URUKSLIDE deck marker title</text:p></draw:text-box></draw:frame></draw:page>",
+    "<draw:page draw:name=\"page2\"><draw:frame draw:name=\"t2\" svg:x=\"1cm\" svg:y=\"1cm\" svg:width=\"20cm\" svg:height=\"3cm\"><draw:text-box><text:p>Second slide body URUKSLIDE</text:p></draw:text-box></draw:frame></draw:page>",
+    "</office:presentation></office:body></office:document-content>'''",
+    "manifest = '''<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+    "<manifest:manifest xmlns:manifest=\"urn:oasis:names:tc:opendocument:xmlns:manifest:1.0\">",
+    "<manifest:file-entry manifest:full-path=\"/\" manifest:media-type=\"application/vnd.oasis.opendocument.presentation\"/>",
+    "<manifest:file-entry manifest:full-path=\"content.xml\" manifest:media-type=\"text/xml\"/>",
+    "</manifest:manifest>'''",
+    "z = zipfile.ZipFile(sys.argv[1], 'w')",
+    "z.writestr(zipfile.ZipInfo('mimetype'), 'application/vnd.oasis.opendocument.presentation', compress_type=zipfile.ZIP_STORED)",
+    "z.writestr('META-INF/manifest.xml', manifest)",
+    "z.writestr('content.xml', content)",
+    "z.close()",
+  ].join("\n");
+  const script = join(WORK, "bake_odp.py");
+  writeFileSync(script, py);
+  must("python3", [script, join(FIX, "deck.odp")]);
+}
+loBake("pptx", join(FIX, "deck.odp"));
+loBake("ppt:MS PowerPoint 97", join(FIX, "deck.odp"));
+// Spreadsheets: CSV literal → XLSX / ODS / XLS bakes via LibreOffice.
+writeFileSync(join(FIX, "cells.csv"), "name,amount\napples,42\nURUKCELL,7\n");
+writeFileSync(join(FIX, "cells.tsv"), "name\tamount\napples\t42\nURUKCELL\t7\n");
+loBake("xlsx", join(FIX, "cells.csv"));
+loBake("ods", join(FIX, "cells.xlsx"));
+loBake("xls:MS Excel 97", join(FIX, "cells.xlsx"));
+// Subtitles with the nasty cases baked in.
+writeFileSync(
+  join(FIX, "subs.srt"),
+  "1\n00:00:01,000 --> 00:00:02,500\nHello URUK subs\n\n2\n01:00:00,000 --> 01:00:01,250\nSecond cue line\n",
+);
+writeFileSync(
+  join(FIX, "subs.vtt"),
+  "WEBVTT\n\nNOTE\nA comment block that must not become a cue\n\ncue-1\n02:03.500 --> 02:04.000 position:50% align:center\nShort time cue\n\n100:00:00.000 --> 100:00:01.500\nFar future cue\n",
+);
+
+// Re-probe helpers for the zip-based office formats and PDFs.
+const PY_ZIP_TEXT = [
+  "import sys, zipfile, re",
+  "path, prefix = sys.argv[1], sys.argv[2]",
+  "try:",
+  "    z = zipfile.ZipFile(path)",
+  "except Exception:",
+  "    sys.exit(0)",
+  "out = []",
+  "for n in z.namelist():",
+  "    if n.startswith(prefix) and (n.endswith('.xml') or n.endswith('.xhtml') or n.endswith('.html')):",
+  "        out.append(re.sub(r'<[^>]+>', ' ', z.read(n).decode('utf-8', 'replace')))",
+  "print(' '.join(out))",
+].join("\n");
+function zipText(path, prefix) {
+  const r = run("python3", ["-c", PY_ZIP_TEXT, path, prefix]);
+  return r.stdout ?? "";
+}
+function pdfPagesOf(path) {
+  const out = must("pdfinfo", [path]);
+  const m = out.match(/Pages:\s+(\d+)/);
+  return m ? Number(m[1]) : 0;
+}
+function pdfTextOf(path) {
+  return must("pdftotext", [path, "-"]);
+}
+function identifyArg(path, fmt) {
+  let r = run("identify", ["-format", fmt, path]);
+  if (r.status !== 0) r = run("magick", ["identify", "-format", fmt, path]);
+  return (r.stdout ?? "").trim();
+}
 
 // Tool capabilities (decides honest-gap expectations).
 const tools = JSON.parse(must(ENGINE, ["tools"]));
@@ -286,6 +392,198 @@ console.log("· archives");
       repack.error ?? listing.slice(0, 200),
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+console.log("· documents (stage 2)");
+{
+  const docx = join(FIX, "doc.docx");
+  const toPdf = engineJob(conv(docx, "pdf"));
+  check(
+    "docx → pdf (LibreOffice, marker + ≥2 pages)",
+    toPdf.ok && pdfPagesOf(toPdf.output) >= 2 && pdfTextOf(toPdf.output).includes("URUKDOC"),
+    toPdf.error ?? "",
+  );
+  const toTxt = engineJob(conv(docx, "txt"));
+  check("docx → txt", toTxt.ok && readFileSync(toTxt.output, "utf8").includes("URUKDOC"), toTxt.error ?? "");
+  const toMd = engineJob(conv(docx, "md"));
+  check(
+    "docx → md (pandoc, heading survives)",
+    toMd.ok && readFileSync(toMd.output, "utf8").includes("URUKDOC") && readFileSync(toMd.output, "utf8").includes("#"),
+    toMd.error ?? "",
+  );
+  const toHtml = engineJob(conv(docx, "html"));
+  check("docx → html", toHtml.ok && readFileSync(toHtml.output, "utf8").includes("URUKDOC"), toHtml.error ?? "");
+  const toEpub = engineJob(conv(docx, "epub"));
+  check("docx → epub", toEpub.ok && zipText(toEpub.output, "").includes("URUKDOC"), toEpub.error ?? "");
+
+  const md2docx = engineJob(conv(join(FIX, "doc.md"), "docx"));
+  check("md → docx", md2docx.ok && zipText(md2docx.output, "word/").includes("URUKDOC"), md2docx.error ?? "");
+  const md2pdf = engineJob(conv(join(FIX, "doc.md"), "pdf"));
+  check(
+    "md → pdf (pandoc → docx → LibreOffice chain)",
+    md2pdf.ok && pdfTextOf(md2pdf.output).includes("URUKDOC"),
+    md2pdf.error ?? "",
+  );
+  const txt2docx = engineJob(conv(join(FIX, "notes.txt"), "docx"));
+  check("txt → docx", txt2docx.ok && zipText(txt2docx.output, "word/").includes("URUKTXT"), txt2docx.error ?? "");
+  const html2pdf = engineJob(conv(join(FIX, "page.html"), "pdf"));
+  check("html → pdf", html2pdf.ok && pdfTextOf(html2pdf.output).includes("URUKHTML"), html2pdf.error ?? "");
+  const rtf2docx = engineJob(conv(join(FIX, "doc.rtf"), "docx"));
+  check("rtf → docx", rtf2docx.ok && zipText(rtf2docx.output, "word/").includes("URUKDOC"), rtf2docx.error ?? "");
+  const odt2pdf = engineJob(conv(join(FIX, "doc.odt"), "pdf"));
+  check("odt → pdf", odt2pdf.ok && pdfTextOf(odt2pdf.output).includes("URUKDOC"), odt2pdf.error ?? "");
+
+  const epub = join(FIX, "doc.epub");
+  const epub2txt = engineJob(conv(epub, "txt"));
+  check("epub → txt (pandoc)", epub2txt.ok && readFileSync(epub2txt.output, "utf8").includes("URUKDOC"), epub2txt.error ?? "");
+  const epub2md = engineJob(conv(epub, "md"));
+  check("epub → md (pandoc)", epub2md.ok && readFileSync(epub2md.output, "utf8").includes("URUKDOC"), epub2md.error ?? "");
+  const epub2pdf = engineJob(conv(epub, "pdf"));
+  check("epub → pdf (pandoc → docx → LibreOffice chain)", epub2pdf.ok && pdfTextOf(epub2pdf.output).includes("URUKDOC"), epub2pdf.error ?? "");
+}
+
+console.log("· pdf (stage 2)");
+{
+  const pdf = join(FIX, "doc.pdf");
+  const pages = pdfPagesOf(pdf);
+  check("fixture pdf has ≥2 pages", pages >= 2, `pages=${pages}`);
+
+  const toJpg = engineJob(conv(pdf, "jpg"));
+  const jpg1 = join(FIX, "doc.converted-page-001.jpg");
+  const jpg2 = join(FIX, "doc.converted-page-002.jpg");
+  check(
+    "pdf → jpg (all pages, page-### names)",
+    toJpg.ok && existsSync(jpg1) && existsSync(jpg2) && Boolean(toJpg.note?.includes("pages")),
+    toJpg.error ?? toJpg.note ?? "",
+  );
+  check(
+    "pdf → jpg is 300 DPI (Letter width = 2550px)",
+    existsSync(jpg1) && identifyFormat(jpg1) === "JPEG" && identifyArg(jpg1, "%w") === "2550",
+    existsSync(jpg1) ? `fmt=${identifyFormat(jpg1)} w=${identifyArg(jpg1, "%w")}` : "missing",
+  );
+  const toPng = engineJob(conv(pdf, "png"));
+  const png1 = join(FIX, "doc.converted-page-001.png");
+  check("pdf → png (all pages)", toPng.ok && existsSync(png1) && identifyFormat(png1) === "PNG", toPng.error ?? "");
+  const toTxt = engineJob(conv(pdf, "txt"));
+  check("pdf → txt", toTxt.ok && readFileSync(toTxt.output, "utf8").includes("URUKDOC"), toTxt.error ?? "");
+  const toMd = engineJob(conv(pdf, "md"));
+  check("pdf → md (extracted text)", toMd.ok && readFileSync(toMd.output, "utf8").includes("URUKDOC"), toMd.error ?? "");
+  const toDocx = engineJob(conv(pdf, "docx"));
+  check(
+    "pdf → docx (text-faithful, labelled)",
+    toDocx.ok && zipText(toDocx.output, "word/").includes("URUKDOC") && Boolean(toDocx.note?.includes("Text-faithful")),
+    toDocx.error ?? toDocx.note ?? "",
+  );
+  const toPptx = engineJob(conv(pdf, "pptx"));
+  check(
+    "pdf → pptx (one slide per page, labelled)",
+    toPptx.ok && zipText(toPptx.output, "ppt/slides/").includes("URUKDOC") && Boolean(toPptx.note?.includes("Text-faithful")),
+    toPptx.error ?? toPptx.note ?? "",
+  );
+  const toEpub = engineJob(conv(pdf, "epub"));
+  check("pdf → epub (text-only, labelled)", toEpub.ok && zipText(toEpub.output, "").includes("URUKDOC"), toEpub.error ?? "");
+  const toXlsx = engineJob(conv(pdf, "xlsx"));
+  check(
+    "pdf → xlsx refuses honestly",
+    !toXlsx.ok && (toXlsx.error ?? "").startsWith("pdf_to_spreadsheet_unavailable"),
+    toXlsx.error ?? "produced output?",
+  );
+}
+
+console.log("· slides (stage 2)");
+{
+  const pptx = join(FIX, "deck.pptx");
+  const toPdf = engineJob(conv(pptx, "pdf"));
+  check(
+    "pptx → pdf (2 slides, marker)",
+    toPdf.ok && pdfPagesOf(toPdf.output) === 2 && pdfTextOf(toPdf.output).includes("URUKSLIDE"),
+    toPdf.error ?? "",
+  );
+  const toJpg = engineJob(conv(pptx, "jpg"));
+  check(
+    "pptx → jpg (every slide, page-### names)",
+    toJpg.ok && existsSync(join(FIX, "deck.converted-page-001.jpg")) && existsSync(join(FIX, "deck.converted-page-002.jpg")),
+    toJpg.error ?? "",
+  );
+  const toPng = engineJob(conv(pptx, "png"));
+  check(
+    "pptx → png",
+    toPng.ok && existsSync(join(FIX, "deck.converted-page-001.png")) && identifyFormat(join(FIX, "deck.converted-page-001.png")) === "PNG",
+    toPng.error ?? "",
+  );
+  const ppt2pdf = engineJob(conv(join(FIX, "deck.ppt"), "pdf"));
+  check("ppt (legacy input) → pdf", ppt2pdf.ok && pdfTextOf(ppt2pdf.output).includes("URUKSLIDE"), ppt2pdf.error ?? "");
+  const odp2pdf = engineJob(conv(join(FIX, "deck.odp"), "pdf"));
+  check("odp (extra input) → pdf", odp2pdf.ok && pdfTextOf(odp2pdf.output).includes("URUKSLIDE"), odp2pdf.error ?? "");
+}
+
+console.log("· spreadsheets (stage 2)");
+{
+  const xlsx = join(FIX, "cells.xlsx");
+  const toCsv = engineJob(conv(xlsx, "csv"));
+  check(
+    "xlsx → csv (comma-separated values)",
+    toCsv.ok && readFileSync(toCsv.output, "utf8").includes("URUKCELL") && readFileSync(toCsv.output, "utf8").includes("name,amount"),
+    toCsv.error ?? "",
+  );
+  const toTsv = engineJob(conv(xlsx, "tsv"));
+  check(
+    "xlsx → tsv (real tabs)",
+    toTsv.ok && readFileSync(toTsv.output, "utf8").includes("name\tamount") && readFileSync(toTsv.output, "utf8").includes("URUKCELL\t7"),
+    toTsv.error ?? "",
+  );
+  const toOds = engineJob(conv(xlsx, "ods"));
+  check("xlsx → ods", toOds.ok && zipText(toOds.output, "content.xml").includes("URUKCELL"), toOds.error ?? "");
+  const toPdf = engineJob(conv(xlsx, "pdf"));
+  check("xlsx → pdf", toPdf.ok && pdfTextOf(toPdf.output).includes("URUKCELL"), toPdf.error ?? "");
+  const csv2xlsx = engineJob(conv(join(FIX, "cells.csv"), "xlsx"));
+  check("csv → xlsx", csv2xlsx.ok && zipText(csv2xlsx.output, "xl/").includes("URUKCELL"), csv2xlsx.error ?? "");
+  const ods2xlsx = engineJob(conv(join(FIX, "cells.ods"), "xlsx"));
+  check("ods → xlsx", ods2xlsx.ok && zipText(ods2xlsx.output, "xl/").includes("URUKCELL"), ods2xlsx.error ?? "");
+  const csv2tsv = engineJob(conv(join(FIX, "cells.csv"), "tsv"));
+  check("csv → tsv", csv2tsv.ok && readFileSync(csv2tsv.output, "utf8").includes("name\tamount"), csv2tsv.error ?? "");
+  const tsv2csv = engineJob(conv(join(FIX, "cells.tsv"), "csv"));
+  check("tsv → csv", tsv2csv.ok && readFileSync(tsv2csv.output, "utf8").includes("name,amount"), tsv2csv.error ?? "");
+  const xls2xlsx = engineJob(conv(join(FIX, "cells.xls"), "xlsx"));
+  check("xls (legacy input) → xlsx", xls2xlsx.ok && zipText(xls2xlsx.output, "xl/").includes("URUKCELL"), xls2xlsx.error ?? "");
+}
+
+console.log("· subtitles (stage 2)");
+{
+  const srt = join(FIX, "subs.srt");
+  const toVtt = engineJob(conv(srt, "vtt"));
+  const vttOut = toVtt.ok ? readFileSync(toVtt.output, "utf8") : "";
+  check(
+    "srt → vtt (header + dot milliseconds)",
+    toVtt.ok && vttOut.startsWith("WEBVTT") && vttOut.includes("00:00:01.000 --> 00:00:02.500") && vttOut.includes("Hello URUK subs"),
+    toVtt.error ?? vttOut.slice(0, 120),
+  );
+  const toTxt = engineJob(conv(srt, "txt"));
+  check(
+    "srt → txt (dialogue only)",
+    toTxt.ok && readFileSync(toTxt.output, "utf8") === "Hello URUK subs\nSecond cue line\n",
+    toTxt.error ?? "",
+  );
+  const vtt = join(FIX, "subs.vtt");
+  const toSrt = engineJob(conv(vtt, "srt"));
+  const srtOut = toSrt.ok ? readFileSync(toSrt.output, "utf8") : "";
+  check(
+    "vtt → srt (settings dropped, NOTE skipped, indices added)",
+    toSrt.ok && srtOut.includes("1\n00:02:03,500 --> 00:02:04,000") && srtOut.includes("Short time cue") && !srtOut.includes("comment block"),
+    toSrt.error ?? srtOut.slice(0, 160),
+  );
+  check(
+    "vtt → srt preserves 100-hour timestamps",
+    toSrt.ok && srtOut.includes("100:00:00,000 --> 100:00:01,500"),
+    srtOut.slice(0, 160),
+  );
+  const vtt2txt = engineJob(conv(vtt, "txt"));
+  check(
+    "vtt → txt (dialogue only, no NOTE)",
+    vtt2txt.ok && readFileSync(vtt2txt.output, "utf8") === "Short time cue\nFar future cue\n",
+    vtt2txt.error ?? "",
+  );
 }
 
 console.log(`\n══ engine tests: ${passed} passed, ${failed} failed, ${gaps} known gaps ══`);

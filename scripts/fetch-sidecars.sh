@@ -16,11 +16,27 @@
 #              Windows: gyan.dev "release essentials" (GPLv3 build);
 #              macOS: evermeet.cx / osxexperts static builds.
 #   7-Zip    — official ip7z/7zip GitHub releases (LGPL).
+#   Pandoc   — official jgm/pandoc GitHub releases (GPLv2+): a single
+#              static binary per OS (Linux tarball, Windows zip, macOS
+#              zip). ~144 MB on disk; it is the document-format engine.
 #   ImageMagick — official portable builds (Apache-2.0 licence):
 #              Windows portable zip from imagemagick.org; Linux: distro
 #              ImageMagick is used via PATH fallback for dev builds (see
 #              README "Development" note); macOS: PENDING — no official
 #              static ImageMagick build exists; tracked in PARITY.md.
+#
+# NOT sidecars (resolved from the system, by design — see PARITY.md):
+#   LibreOffice — a full office suite (~284 MB installed on Linux, more
+#              with per-OS installers). Bundling it would roughly triple
+#              the installer; the engine resolves a system install via
+#              PATH/`soffice`. Final packaging decision (bundle vs.
+#              detect-and-prompt) is a Stage 4 item, recorded in PARITY.md.
+#   poppler-utils (pdftoppm/pdftotext/pdfinfo/pdfimages) — small tools
+#              with shared-library builds only; no official static
+#              binaries. Linux: distro package (the .deb declares it in
+#              Depends). Windows: community poppler builds exist but ship
+#              DLL trees, not single files — packaging PENDING. macOS:
+#              PENDING. The engine resolves them from PATH meanwhile.
 set -euo pipefail
 
 TRIPLE="${1:-}"

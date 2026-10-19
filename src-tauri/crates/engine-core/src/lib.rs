@@ -965,7 +965,9 @@ fn move_file(from: &Path, to: &Path) -> EngineResult<()> {
 
 /// Run LibreOffice headless: convert `input` with the `--convert-to`
 /// spec (e.g. "pdf", "docx", "csv:Text - txt - csv (StarCalc):44,34,76")
-/// into `staging`, then move the produced file to `dest`.
+/// into `staging`, then move the produced file to `dest`. `infilter`
+/// optionally pins the import filter (delimited-text inputs need their
+/// separator declared, or Calc imports each line as a single cell).
 /// Returns the destination path.
 #[allow(clippy::too_many_arguments)]
 fn lo_convert(
@@ -973,6 +975,7 @@ fn lo_convert(
     input: &Path,
     spec: &str,
     produced_ext: &str,
+    infilter: Option<&str>,
     staging: &Path,
     dest: &Path,
     cancel: &Arc<AtomicBool>,
@@ -983,16 +986,21 @@ fn lo_convert(
     let profile = staging.join("lo-profile");
     std::fs::create_dir_all(&out_dir)
         .map_err(|e| EngineError::new("io", format!("Cannot create temp folder: {e}")))?;
-    let args: Vec<String> = vec![
+    let mut args: Vec<String> = vec![
         s("--headless"),
         s("--norestore"),
         format!("-env:UserInstallation=file://{}", profile.to_string_lossy()),
+    ];
+    if let Some(f) = infilter {
+        args.push(format!("--infilter={f}"));
+    }
+    args.extend([
         s("--convert-to"),
         s(spec),
         s("--outdir"),
         out_dir.to_string_lossy().into_owned(),
         input.to_string_lossy().into_owned(),
-    ];
+    ]);
     let cmd = CommandSpec { program: soffice, args, tool_name: "LibreOffice".into() };
     progress(-1.0);
     run_streaming(&cmd, None, cancel, progress)?;
@@ -1103,7 +1111,9 @@ fn rasterize_pdf(
         page_stem = format!("{base_stem} ({n})");
         n += 1;
     }
-    let prefix = out_dir.join(format!("{page_stem}-page-"));
+    // pdftoppm appends "-<page>" itself, so the prefix ends at "-page"
+    // (a trailing hyphen here would produce "page--1" names).
+    let prefix = out_dir.join(format!("{page_stem}-page"));
     let mut args: Vec<String> = vec![s("-r"), s("300")];
     if target == "jpg" {
         args.extend(["-jpeg".into(), "-jpegopt".into(), "quality=90".into()]);
@@ -1290,10 +1300,10 @@ fn convert_document(
                     }
                     let tmp_docx = staging.join("pre.docx");
                     pandoc_convert(tools, input, &tmp_docx, &[], cancel, progress)?;
-                    lo_convert(tools, &tmp_docx, "pdf", "pdf", &staging, &out, cancel, progress)?;
+                    lo_convert(tools, &tmp_docx, "pdf", "pdf", None, &staging, &out, cancel, progress)?;
                 }
                 _ => {
-                    lo_convert(tools, input, "pdf", "pdf", &staging, &out, cancel, progress)?;
+                    lo_convert(tools, input, "pdf", "pdf", None, &staging, &out, cancel, progress)?;
                 }
             }
             return Ok(JobOutcome { output: out.clone(), note: None });
@@ -1339,7 +1349,7 @@ fn convert_document(
             pandoc_convert(tools, input, &tmp, &extra, cancel, progress)?;
             move_file(&tmp, &out)?;
         } else {
-            lo_convert(tools, input, target, target, &staging, &out, cancel, progress)?;
+            lo_convert(tools, input, target, target, None, &staging, &out, cancel, progress)?;
         }
         Ok(JobOutcome { output: out.clone(), note: None })
     })();
@@ -1359,7 +1369,7 @@ fn convert_slides(
         "pdf" => {
             let staging = staging_dir("slides")?;
             let out = output_path(input, "pdf", settings);
-            let result = lo_convert(tools, input, "pdf", "pdf", &staging, &out, cancel, progress)
+            let result = lo_convert(tools, input, "pdf", "pdf", None, &staging, &out, cancel, progress)
                 .map(|o| JobOutcome { output: o, note: None });
             let _ = std::fs::remove_dir_all(&staging);
             result
@@ -1370,7 +1380,7 @@ fn convert_slides(
             let staging = staging_dir("slides")?;
             let result = (|| -> EngineResult<JobOutcome> {
                 let pdf = staging.join("deck.pdf");
-                lo_convert(tools, input, "pdf", "pdf", &staging, &pdf, cancel, progress)?;
+                lo_convert(tools, input, "pdf", "pdf", None, &staging, &pdf, cancel, progress)?;
                 rasterize_pdf(tools, &pdf, input, target, settings, cancel, progress)
             })();
             let _ = std::fs::remove_dir_all(&staging);
@@ -1412,7 +1422,14 @@ fn convert_spreadsheet(
     } else {
         None
     };
-    let result = lo_convert(tools, input, spec, target, &staging, &out, cancel, progress)
+    // Delimited-text inputs must declare their separator on import, or
+    // Calc reads every line as a single cell (proven in testing).
+    let infilter = match extension_of(input).as_str() {
+        "csv" => Some("Text - txt - csv (StarCalc):44,34,76"),
+        "tsv" => Some("Text - txt - csv (StarCalc):9,34,76"),
+        _ => None,
+    };
+    let result = lo_convert(tools, input, spec, target, infilter, &staging, &out, cancel, progress)
         .map(|o| JobOutcome { output: o, note });
     let _ = std::fs::remove_dir_all(&staging);
     result
