@@ -20,6 +20,19 @@ note) · `[ ]` not yet built.
 **Stage 1 status: foundation shipped** — app shell, the sun-disc wheel,
 queue, settings, and the image / audio / video / archive engines.
 
+**Stage 2 status: document-side engines shipped** — documents, PDF,
+slides, spreadsheets and subtitles, all proven by the same
+fixture → convert → re-probe standard (75 integration checks green).
+237 conversions now ship (221 of the 260 enumerated from the reference,
+plus 16 extras the reference does not offer: ODT/ODP inputs and the
+document PDF-export column). Routing, decided by prototyping the real
+tools: **LibreOffice** (headless, per-job private profile) owns
+layout-bound work — anything → PDF, office formats, slides, sheets;
+**Pandoc** owns semantic formats (Markdown, HTML, EPUB, plain text,
+DOCX-from-text) and is the only EPUB reader; **poppler** owns PDF
+rasterization (all pages, 300 DPI) and text extraction; subtitles are
+converted in pure Rust inside the engine (millisecond-exact).
+
 ---
 
 ## Images — 57 conversions
@@ -73,42 +86,87 @@ Engine: FFmpeg.
 - [x] WMV → MP4, MOV, MKV, WebM, AVI, GIF, MP3
 - [x] GIF → MP4, MOV, MKV, WebM, AVI, WMV
 
-## PDF — 9 conversions (later stage)
+## PDF — 9 conversions
 
-- [ ] PDF → DOCX, Pages, PPTX, XLSX, JPG, PNG, EPUB, TXT, MD
-  (all pages; images at 300 DPI)
+Engines: poppler (raster + text), Pandoc (office/text rebuilding).
+LibreOffice has **no** PDF → office export filter (verified: "Error:
+no export filter" — a PDF imports as a drawing), so the office routes
+below are built from extracted text and are labelled accordingly,
+in-app and here. Pages are exported at 300 DPI with `-page-###` names.
 
-## Documents — 43 conversions (later stage)
+- [x] PDF → JPG, PNG (all pages, 300 DPI)
+- [x] PDF → TXT, MD (extracted text; MD is the extracted text in a
+  Markdown file — no layout is implied)
+- [~] PDF → DOCX, PPTX — implemented via extracted text + Pandoc
+  (PPTX gets one slide per page). **Text-faithful only**: the original
+  page layout, fonts and images are not preserved. The app says so in
+  every result.
+- [~] PDF → EPUB — implemented the same way (text-only EPUB).
+- [~] PDF → XLSX — offered, and **refused with a plain-language
+  error**: a PDF stores drawn text, not cells, and no honest route
+  rebuilds spreadsheet structure from it. Shipping a text dump named
+  `.xlsx` would be a fake conversion.
+- [ ] PDF → Pages — not offered: Pages is an Apple-only format with
+  no open writer on any platform.
 
-Inputs: DOCX, Pages, Markdown, TXT, EPUB, plus RTF / RTFD / text
-clippings (input-only). Targets: DOCX, Pages, Markdown, TXT, EPUB, HTML.
+## Documents — 37 conversions shipped (reference enumerates 43)
 
-- [ ] DOCX → Pages, MD, TXT, EPUB, HTML
-- [ ] Pages → DOCX, MD, TXT, EPUB, HTML
-- [ ] Markdown → DOCX, Pages, TXT, EPUB, HTML
-- [ ] TXT → DOCX, Pages, MD, EPUB, HTML
-- [ ] EPUB → DOCX, Pages, MD, TXT, HTML
-- [ ] RTF → DOCX, Pages, MD, TXT, EPUB, HTML
-- [ ] RTFD → DOCX, Pages, MD, TXT, EPUB, HTML
-- [ ] Text clippings → DOCX, Pages, MD, TXT, EPUB, HTML
+Targets: PDF (export), DOCX, MD, TXT, EPUB, HTML. Engines: Pandoc
+(semantic targets), LibreOffice (PDF export and fallback). Routes
+exercised end-to-end in tests: DOCX → all six targets; MD → DOCX, PDF;
+TXT → DOCX; HTML → PDF; RTF → DOCX; ODT → PDF; EPUB → TXT, MD, PDF.
+The remaining pairs run through those exact code paths. The
+LibreOffice fallback for HTML/TXT/DOCX/EPUB (used only when Pandoc is
+absent) is implemented but not covered by the automated suite —
+Pandoc ships as a sidecar, so the fallback is a degraded-environment
+path. Markdown output and EPUB input strictly require Pandoc.
 
-## Slides — 6 conversions (later stage)
+- [x] DOCX → PDF, MD, TXT, EPUB, HTML
+- [x] RTF → PDF, DOCX, MD, TXT, EPUB, HTML
+- [x] Markdown → PDF, DOCX, TXT, EPUB, HTML
+- [x] TXT → PDF, DOCX, MD, EPUB, HTML
+- [x] HTML → PDF, DOCX, MD, TXT, EPUB
+- [x] EPUB → PDF, DOCX, MD, TXT, HTML
+- [x] ODT → PDF, DOCX, MD, TXT, EPUB, HTML — *extra input the
+  reference (a Mac app) does not list; LibreOffice-native.*
+- [ ] The Pages column (7 conversions: → Pages from each input, and
+  Pages as an input) — not offered: no open toolchain reads or writes
+  Apple's Pages format.
+- [ ] RTFD and text-clippings inputs (12 conversions) — macOS-only
+  formats with no open reader; not shipped.
 
-- [ ] PPTX → PDF, JPG, PNG
-- [ ] PPT (input only) → PDF, JPG, PNG
+## Slides — 6 conversions (+3 extra)
 
-## Spreadsheets — 21 conversions (later stage)
+Engine: LibreOffice renders the deck to PDF; poppler rasterizes at
+300 DPI with `-page-###` names (the PDF pipeline).
 
-- [ ] XLSX → ODS, CSV, TSV, PDF
-- [ ] ODS → XLSX, CSV, TSV, PDF
-- [ ] CSV → XLSX, ODS, TSV, PDF
-- [ ] TSV → XLSX, ODS, CSV, PDF
-- [ ] XLS (input only) → XLSX, ODS, CSV, TSV, PDF
+- [x] PPTX → PDF, JPG, PNG
+- [x] PPT (input only) → PDF, JPG, PNG
+- [x] ODP → PDF, JPG, PNG — *extra input (LibreOffice-native).*
 
-## Subtitles — 4 conversions (later stage)
+## Spreadsheets — 21 conversions
 
-- [ ] SRT → VTT, TXT
-- [ ] VTT → SRT, TXT
+Engine: LibreOffice Calc. Delimited exports carry only the first
+sheet (the app says so); TSV import/export pins the separator via
+LibreOffice filter options (a tab file imported as comma-CSV would
+collapse every row into one cell — caught by tests, fixed with
+`--infilter`).
+
+- [x] XLSX → ODS, CSV, TSV, PDF
+- [x] ODS → XLSX, CSV, TSV, PDF
+- [x] CSV → XLSX, ODS, TSV, PDF
+- [x] TSV → XLSX, ODS, CSV, PDF
+- [x] XLS (input only) → XLSX, ODS, CSV, TSV, PDF
+
+## Subtitles — 4 conversions
+
+Engine: pure Rust in engine-core — no external tool. Timestamps are
+integer milliseconds (comma ↔ dot), hours may exceed 99, VTT cue
+settings/identifiers and NOTE blocks are handled, TXT export is
+dialogue lines only. Edge cases are unit-tested.
+
+- [x] SRT → VTT, TXT
+- [x] VTT → SRT, TXT
 
 ## Archives — 16 operations
 
@@ -164,8 +222,14 @@ Shipped extras (not reference items):
 - [x] **The wheel** — radial sun-disc menu on drop of a single file,
   showing only valid targets for that file's family; click a segment
   to convert
-- [ ] Hold-a-key wheel during OS-wide drags (the reference's Shift-key
-  overlay) — needs platform drag interception; later stage
+- [ ] **Interaction model — global drag overlay (dedicated stage).**
+  The reference is a *background utility*, not an app window: the user
+  drags a file anywhere in the OS, taps a modifier mid-drag, and the
+  wheel appears at the cursor as an overlay; tool segments open small
+  floating HUD panels. The window shipped in Stages 1–2 is the
+  settings / history / fallback surface only. The overlay is a
+  dedicated stage and will call this same engine layer — engine-core
+  has no UI coupling (the test CLI already drives it headlessly).
 - [x] Conversion queue: per-file progress, cancel, plain-language errors
 - [x] Output next to the source (`name.converted.ext`) or to a chosen
   folder; never overwrites the source
@@ -173,9 +237,10 @@ Shipped extras (not reference items):
   wheel behavior (documented placeholder)
 - [x] Arabic + English UI (Arabic first, full RTL)
 - [x] Fully local: zero network use; bundled FFmpeg / ImageMagick /
-  7-Zip sidecars
+  7-Zip / Pandoc sidecars; LibreOffice and poppler resolved where
+  installed (see platform notes)
 
-## Platform notes (Stage 1)
+## Platform notes (Stages 1–2)
 
 - Linux: production `.deb`/AppImage builds bundle FFmpeg + FFprobe +
   7-Zip sidecars; ImageMagick resolves from the distro package via PATH
@@ -187,3 +252,19 @@ Shipped extras (not reference items):
   7-Zip standalone sidecars are pending (no official static builds) —
   macOS bundles are therefore not yet at parity and are not released
   until they are.
+- **Pandoc (Stage 2)**: a single static binary per OS, fetched by
+  `scripts/fetch-sidecars.sh` for all five triples and bundled like
+  the other sidecars. Cost: ~144 MB on disk — the document engine is
+  the single largest payload in the installer.
+- **LibreOffice (Stage 2)**: resolved from a system install
+  (`soffice` on PATH), NOT bundled. Measured size: ~284 MB installed
+  on the Linux reference machine; per-OS installers are larger.
+  Bundling it would roughly triple the download and freeze the office
+  version we ship. **Decision deferred to Stage 4 packaging**:
+  bundle vs. detect-and-prompt-to-install. Until then the document,
+  slides and spreadsheet families require LibreOffice to be installed
+  and the engine says so plainly when it is missing (`tool_missing`).
+- **poppler-utils (Stage 2)**: resolved from PATH. No official static
+  builds exist (shared-library tools). The Linux `.deb` declares
+  `poppler-utils` in Depends; Windows community builds ship DLL trees
+  (packaging pending); macOS packaging pending — same Stage 4 pass.

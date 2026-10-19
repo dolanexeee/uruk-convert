@@ -29,6 +29,33 @@ proven by tests.
   folder you choose) and never overwrites the original.
 - Arabic + English interface (Arabic first, full RTL). Zero network use.
 
+## Stage 2 — document-side engines
+
+- **Documents** (Pandoc + LibreOffice): DOCX, ODT, RTF, TXT, Markdown,
+  HTML and EPUB → PDF, DOCX, MD, TXT, EPUB, HTML. (EPUB input and
+  Markdown output are Pandoc-only routes.)
+- **PDF** (poppler + Pandoc): → JPG/PNG with **every page at 300 DPI**
+  (`name.converted-page-001.jpg`), → TXT/MD extracted text, and
+  text-faithful → DOCX/PPTX/EPUB, labelled as such in the result —
+  LibreOffice provably has no PDF→office export filter, so these are
+  rebuilt from the PDF's text, never dressed up as layout-true.
+  PDF → XLSX is refused with a plain explanation instead of a fake file.
+- **Slides** (LibreOffice + poppler): PPTX and legacy PPT (plus ODP)
+  → PDF, JPG, PNG.
+- **Spreadsheets** (LibreOffice Calc): XLSX, ODS, CSV, TSV and legacy
+  XLS (input-only) interconvert, plus PDF export. Delimited exports
+  carry the first sheet.
+- **Subtitles** (pure Rust, no external tool): SRT ↔ VTT with exact
+  timestamp reformatting (comma ↔ dot milliseconds, 100+ hour cues),
+  and → TXT dialogue export.
+
+The document, slides and spreadsheet families need **LibreOffice
+installed** (resolved via `soffice` on PATH; not bundled — see
+PARITY.md's platform notes for the measured size tradeoff and the
+Stage 4 packaging decision), and PDF work needs **poppler-utils**
+(the Linux `.deb` declares it). Pandoc ships as a bundled sidecar
+like the other engines.
+
 Known platform gaps are listed in PARITY.md — notably HEIC *export*
 (the open toolchains ship no HEIC encoder on Linux/Windows yet) and
 macOS sidecar packaging for ImageMagick/7-Zip.
@@ -48,9 +75,11 @@ tests/engine/        Integration tests: real conversions, re-probed
 ```
 
 All conversions run through bundled sidecar builds of **FFmpeg** (GPLv3
-builds, shipped unmodified), **ImageMagick** (Apache-2.0) and **7-Zip**
-(LGPL), resolved by one engine layer: bundled sidecar first, `PATH` as a
-development fallback.
+builds, shipped unmodified), **ImageMagick** (Apache-2.0), **7-Zip**
+(LGPL) and **Pandoc** (GPLv2+), plus system-resolved **LibreOffice**
+(MPLv2/LGPLv3) and **poppler** (GPLv2) — all resolved by one engine
+layer: bundled sidecar first, `PATH` as a development fallback. The
+subtitle engine is pure Rust inside engine-core.
 
 ## Development
 
@@ -78,4 +107,6 @@ the same pipeline proven by Uruk Cut.
 
 Apache-2.0. The bundled tools keep their own licenses (FFmpeg GPLv3
 builds are shipped unmodified as standalone executables; 7-Zip is LGPL;
-ImageMagick is Apache-2.0).
+ImageMagick is Apache-2.0; Pandoc is GPLv2+, shipped unmodified as a
+standalone executable; system LibreOffice and poppler keep their own
+licenses and are never redistributed by this project).

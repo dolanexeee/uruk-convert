@@ -58,6 +58,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 SEVENZIP_VER="25.01"
 SEVENZIP_TAG="25.01"
+PANDOC_VER="3.5"
 
 fetch_ffmpeg() {
   case "$TRIPLE" in
@@ -143,8 +144,39 @@ fetch_magick() {
   esac
 }
 
+fetch_pandoc() {
+  case "$TRIPLE" in
+    x86_64-unknown-linux-gnu)
+      curl -fL --retry 3 -o "$TMP/pandoc.tar.gz" "https://github.com/jgm/pandoc/releases/download/${PANDOC_VER}/pandoc-${PANDOC_VER}-linux-amd64.tar.gz"
+      tar -xzf "$TMP/pandoc.tar.gz" -C "$TMP"
+      cp "$TMP/pandoc-${PANDOC_VER}/bin/pandoc" "$DEST/uruk-pandoc-$TRIPLE"
+      ;;
+    aarch64-unknown-linux-gnu)
+      curl -fL --retry 3 -o "$TMP/pandoc.tar.gz" "https://github.com/jgm/pandoc/releases/download/${PANDOC_VER}/pandoc-${PANDOC_VER}-linux-arm64.tar.gz"
+      tar -xzf "$TMP/pandoc.tar.gz" -C "$TMP"
+      cp "$TMP/pandoc-${PANDOC_VER}/bin/pandoc" "$DEST/uruk-pandoc-$TRIPLE"
+      ;;
+    x86_64-pc-windows-msvc)
+      curl -fL --retry 3 -o "$TMP/pandoc.zip" "https://github.com/jgm/pandoc/releases/download/${PANDOC_VER}/pandoc-${PANDOC_VER}-windows-x86_64.zip"
+      unzip -q "$TMP/pandoc.zip" -d "$TMP"
+      cp "$TMP/pandoc-${PANDOC_VER}/pandoc.exe" "$DEST/uruk-pandoc-$TRIPLE.exe"
+      ;;
+    x86_64-apple-darwin)
+      curl -fL --retry 3 -o "$TMP/pandoc.zip" "https://github.com/jgm/pandoc/releases/download/${PANDOC_VER}/pandoc-${PANDOC_VER}-x86_64-macOS.zip"
+      unzip -q "$TMP/pandoc.zip" -d "$TMP"
+      cp "$TMP/pandoc-${PANDOC_VER}/bin/pandoc" "$DEST/uruk-pandoc-$TRIPLE"
+      ;;
+    aarch64-apple-darwin)
+      curl -fL --retry 3 -o "$TMP/pandoc.zip" "https://github.com/jgm/pandoc/releases/download/${PANDOC_VER}/pandoc-${PANDOC_VER}-arm64-macOS.zip"
+      unzip -q "$TMP/pandoc.zip" -d "$TMP"
+      cp "$TMP/pandoc-${PANDOC_VER}/bin/pandoc" "$DEST/uruk-pandoc-$TRIPLE"
+      ;;
+  esac
+}
+
 fetch_ffmpeg
 fetch_7z
+fetch_pandoc
 fetch_magick
 chmod +x "$DEST"/uruk-* 2>/dev/null || true
 echo "Sidecars for $TRIPLE in $DEST:"

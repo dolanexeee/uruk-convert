@@ -1,7 +1,7 @@
 [package]
 name = "uruk-engine-core"
-version = "0.1.0"
-description = "Uruk Convert — conversion engine layer (ffmpeg / ImageMagick / 7-Zip sidecars)"
+version = "0.2.0"
+description = "Uruk Convert — conversion engine layer (FFmpeg / ImageMagick / 7-Zip / Pandoc sidecars; LibreOffice + poppler resolved)"
 authors = ["URUK contributors"]
 edition = "2021"
 license = "Apache-2.0"
