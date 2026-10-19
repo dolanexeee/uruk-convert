@@ -1640,7 +1640,39 @@ fn handle_sensor_event(app: &AppHandle, ev: SensorEvent) {
             }
         }
         SensorEvent::Notice { code, message } => {
-            if code == "permission_missing" {
+            if code == "sensor_armed" || code == "sensor_failed" {
+                // The sensor reports its own liveness (v1.0.1): keep
+                // the Settings platform note truthful, and make a
+                // failure impossible to miss (toast, not just stderr).
+                if let Some(state) = app.try_state::<AppState>() {
+                    let failed = code == "sensor_failed";
+                    let ar = state.agent.lock().unwrap().is_ar();
+                    {
+                        let mut note = state.platform_note.lock().unwrap();
+                        note.1 = if failed {
+                            format!("FAILED — {message}")
+                        } else if ar {
+                            "مُفعَّل — اسحب أي ملف واضغط Shift أثناء السحب".to_string()
+                        } else {
+                            "armed — drag a file and tap Shift mid-drag".to_string()
+                        };
+                    }
+                    if failed {
+                        let (title, body) = if ar {
+                            (
+                                "حسّاس السحب متوقف".to_string(),
+                                format!("عجلة السحب العالمية لن تعمل: {message}"),
+                            )
+                        } else {
+                            (
+                                "Drag sensor stopped".to_string(),
+                                format!("The global drag wheel will not work: {message}"),
+                            )
+                        };
+                        state.toast(ToastKind::Error, title, body);
+                    }
+                }
+            } else if code == "permission_missing" {
                 if let Some(state) = app.try_state::<AppState>() {
                     let ar = state.agent.lock().unwrap().is_ar();
                     let (title, body) = if ar {
@@ -1841,14 +1873,31 @@ fn start_sensor(app: &AppHandle, state: &AppState) {
         })
     });
     let config = settings.sensor_config();
+    let note_on_fail = state.platform_note.clone();
+    let platform_for_thread = platform.clone();
     std::thread::Builder::new()
         .name("uruk-drag-sensor".into())
         .spawn(move || {
+            let notify_tx = ev_tx.clone();
             if let Err(e) = sensor.start(config, ev_tx, cmd_rx, resolver) {
                 eprintln!(
                     "uruk-convert: drag sensor stopped: [{}] {}",
                     e.code, e.message
                 );
+                // Never die silently (the v1.0.0 Windows lesson): the
+                // failure lands in the Settings platform note AND as a
+                // toast via the sensor_failed notice.
+                {
+                    let mut note = note_on_fail.lock().unwrap();
+                    *note = (
+                        platform_for_thread.clone(),
+                        format!("FAILED — {}", e.message),
+                    );
+                }
+                let _ = notify_tx.send(SensorEvent::Notice {
+                    code: "sensor_failed".to_string(),
+                    message: e.message.clone(),
+                });
             }
         })
         .ok();

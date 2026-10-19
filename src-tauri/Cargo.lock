@@ -3832,7 +3832,7 @@ dependencies = [
 
 [[package]]
 name = "uruk-convert"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3845,7 +3845,7 @@ dependencies = [
 
 [[package]]
 name = "uruk-drag-sensor"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "libc",
  "png 0.18.1",
@@ -3859,7 +3859,7 @@ dependencies = [
 
 [[package]]
 name = "uruk-engine-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde",
  "serde_json",

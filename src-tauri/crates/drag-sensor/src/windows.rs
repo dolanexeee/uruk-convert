@@ -58,6 +58,22 @@
 //! pure logic in this module (HDROP parsing, the gesture state machine)
 //! compiles and is unit-tested on any OS. Off Windows, `start` and
 //! `set_autostart` return an `unsupported` error.
+//!
+//! **v1.0.0 post-mortem (fixed in v1.0.1).** The shipped sensor was
+//! silently dead on real machines while the process, the tray and the
+//! CI launch smoke all looked healthy. Root cause: the queue-drain
+//! timer was created with `SetTimer(null_mut(), TIMER_ID, …)`. For a
+//! NULL-hWnd timer the system *ignores* the requested ID and assigns
+//! its own — returned by `SetTimer`, which the code discarded — so
+//! every `WM_TIMER` carried an ID ≠ `TIMER_ID`, the message loop's
+//! match never fired, and `SensorCore::tick` (the only drain of the
+//! hook queue and the command channel) never ran once. The timer now
+//! lives on a message-only host window (hWnd timers honor their ID),
+//! start failures and successful arming are reported to the shell
+//! (Settings shows the real status; a failure also toasts), and a
+//! persistent diagnostic log (`%APPDATA%\org.uruk.convert\sensor.log`)
+//! records the sensor's decisions so a silent death can never hide
+//! again.
 
 use std::sync::mpsc::{Receiver, Sender};
 
@@ -216,6 +232,10 @@ pub struct GestureTracker {
     last: (i32, i32),
     config: SensorConfig,
     summon_kind: Option<WheelKind>,
+    /// The most recent modifier set reported by any Chord record —
+    /// tracked in *every* state (even Idle) so the held-modifier
+    /// fallback can fire when a drag confirms (v1.0.1).
+    held: HeldMods,
 }
 
 impl Default for GestureTracker {
@@ -244,6 +264,11 @@ impl GestureTracker {
             last: (0, 0),
             config: default_sensor_config(),
             summon_kind: None,
+            held: HeldMods {
+                shift: false,
+                control: false,
+                alt: false,
+            },
         }
     }
 
@@ -275,12 +300,30 @@ impl GestureTracker {
                     let limit = DRAG_THRESHOLD_PX as i64;
                     if dx * dx + dy * dy > limit * limit {
                         self.state = GestureState::Candidate;
+                        // Held-modifier fallback (macOS parity, v1.0.1):
+                        // the summon chord may already be down — held
+                        // from before the press, or pressed while the
+                        // drag was still under the threshold — in which
+                        // case no fresh Chord edge will ever arrive for
+                        // it. Summon as the drag confirms instead.
+                        if let Some(k) = chord_for(self.held, &self.config) {
+                            self.state = GestureState::Summoned;
+                            self.summon_kind = Some(k);
+                            return Some(GestureOutput::Summon {
+                                x,
+                                y,
+                                kind: k,
+                            });
+                        }
                         return Some(GestureOutput::Candidate { x, y });
                     }
                 }
                 None
             }
             HookRecord::Chord(held) => {
+                // Track the held set in every state: the MouseMove
+                // fallback above reads it when a drag confirms.
+                self.held = held;
                 let kind = chord_for(held, &self.config);
                 match self.state {
                     GestureState::Candidate => match kind {
@@ -525,6 +568,61 @@ mod imp {
         }
     }
 
+    // -- Diagnostic log (v1.0.1: the sensor must never die silently) --
+    //
+    // `%APPDATA%\org.uruk.convert\sensor.log` — the same app-data
+    // folder the shell keeps `history.json` in. Append mode; rotated
+    // aside once per process start when past the cap. Every line is
+    // flushed: this log is crash evidence first, a debug aid second.
+    // The hook callbacks never log (near-empty contract); the sensor
+    // thread logs its own decisions.
+
+    static SLOG_FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
+    const SLOG_CAP_BYTES: u64 = 256 * 1024;
+
+    fn slog_path() -> PathBuf {
+        let base = std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        base.join("org.uruk.convert").join("sensor.log")
+    }
+
+    fn slog_init() {
+        let path = slog_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.len() > SLOG_CAP_BYTES {
+                let _ = std::fs::rename(&path, path.with_extension("log.old"));
+            }
+        }
+        if let Ok(f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            if let Ok(mut guard) = SLOG_FILE.lock() {
+                *guard = Some(f);
+            }
+        }
+    }
+
+    fn slog(msg: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let line = format!("[{}.{:03}] {}", now.as_secs(), now.subsec_millis(), msg);
+        eprintln!("uruk-sensor: {line}");
+        if let Ok(mut guard) = SLOG_FILE.lock() {
+            if let Some(f) = guard.as_mut() {
+                use std::io::Write as _;
+                let _ = writeln!(f, "{line}");
+                let _ = f.flush();
+            }
+        }
+    }
+
     // -- Low-level hook callbacks (near-empty by contract) -----------------
 
     unsafe extern "system" fn mouse_hook_proc(
@@ -730,18 +828,47 @@ mod imp {
         set_clipboard_data(CF_UNICODETEXT as u32, &bytes);
     }
 
+    /// Register one window class; a real failure (anything but
+    /// "already exists") goes to the diagnostic log — in v1.0.0 this
+    /// result was discarded, so a failed class silently poisoned every
+    /// later `CreateWindowExW`.
+    unsafe fn register_class(wc: &WNDCLASSEXW, name: &str) {
+        if RegisterClassExW(wc) == 0 {
+            let err = GetLastError();
+            // ERROR_CLASS_ALREADY_EXISTS (1410) is fine — idempotent.
+            if err != 1410 {
+                slog(&format!(
+                    "RegisterClassExW({name}) failed (GetLastError {err})"
+                ));
+            }
+        }
+    }
+
     unsafe fn ensure_classes(hinst: windows_sys::Win32::Foundation::HINSTANCE) {
         if CLASSES_DONE.swap(true, Ordering::SeqCst) {
             return;
         }
-        for class_name in [
-            windows_sys::w!("UrukConvertWheelOverlay"),
-            windows_sys::w!("UrukConvertToast"),
+        for (proc, class_name, label) in [
+            (
+                overlay_wndproc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT,
+                windows_sys::w!("UrukConvertWheelOverlay"),
+                "UrukConvertWheelOverlay",
+            ),
+            (
+                overlay_wndproc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT,
+                windows_sys::w!("UrukConvertToast"),
+                "UrukConvertToast",
+            ),
+            (
+                host_wndproc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT,
+                windows_sys::w!("UrukConvertSensorHost"),
+                "UrukConvertSensorHost",
+            ),
         ] {
             let wc = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
                 style: CS_HREDRAW | CS_VREDRAW,
-                lpfnWndProc: Some(overlay_wndproc),
+                lpfnWndProc: Some(proc),
                 cbClsExtra: 0,
                 cbWndExtra: 0,
                 hInstance: hinst,
@@ -752,8 +879,7 @@ mod imp {
                 lpszClassName: class_name,
                 hIconSm: null_mut(),
             };
-            // 0 with ERROR_CLASS_ALREADY_EXISTS is fine (idempotent).
-            let _ = RegisterClassExW(&wc);
+            register_class(&wc, label);
         }
         // Stage 4: the HUD panel has its own proc (it takes real
         // mouse + keyboard input, unlike the click-through overlays).
@@ -771,7 +897,7 @@ mod imp {
             lpszClassName: windows_sys::w!("UrukConvertPanel"),
             hIconSm: null_mut(),
         };
-        let _ = RegisterClassExW(&wc);
+        register_class(&wc, "UrukConvertPanel");
     }
 
     unsafe extern "system" fn panel_wndproc(
@@ -870,6 +996,41 @@ mod imp {
         let p = CORE_PTR.load(Ordering::SeqCst);
         if p != 0 {
             unsafe { f(&mut *(p as *mut SensorCore)) }
+        }
+    }
+
+    fn core_shutdown() -> bool {
+        let p = CORE_PTR.load(Ordering::SeqCst);
+        if p == 0 {
+            return false;
+        }
+        unsafe { (*(p as *const SensorCore)).shutdown }
+    }
+
+    /// The sensor host window's proc. The host is a message-only
+    /// window created on the sensor thread purely to own the 8 ms
+    /// queue-drain timer: an hWnd timer honors its ID, unlike the
+    /// v1.0.0 thread timer whose system-assigned ID never matched the
+    /// loop's check (see the module post-mortem). WM_TIMER → tick.
+    unsafe extern "system" fn host_wndproc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match msg {
+            WM_TIMER => {
+                with_core(|core| core.tick());
+                if core_shutdown() {
+                    PostQuitMessage(0);
+                }
+                0
+            }
+            WM_CLOSE => {
+                PostQuitMessage(0);
+                0
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
     }
 
@@ -1183,6 +1344,9 @@ mod imp {
         toast_hwnd: HWND,
         toast_until: Option<Instant>,
         shutdown: bool,
+        /// Set on the first `tick` — proof in the log that the pump is
+        /// actually draining (the thing v1.0.0 never did).
+        pump_logged: bool,
 
         // Stage 4.
         /// Wheel kind the current chord selected (set at summon).
@@ -1209,12 +1373,21 @@ mod imp {
         // -- command / queue pump (timer tick) --
 
         unsafe fn tick(&mut self) {
+            if !self.pump_logged {
+                self.pump_logged = true;
+                slog("pump alive: first tick — hook queue + command channel draining");
+            }
             loop {
                 match self.commands.try_recv() {
                     Ok(SensorCommand::Shutdown) => {
+                        slog("command: shutdown");
                         self.shutdown = true;
                     }
                     Ok(SensorCommand::UpdateConfig(cfg)) => {
+                        slog(&format!(
+                            "command: update config (sensing enabled={})",
+                            cfg.enabled
+                        ));
                         self.gesture.set_config(&cfg);
                         self.config = cfg;
                     }
@@ -1282,11 +1455,21 @@ mod imp {
 
         unsafe fn on_gesture_output(&mut self, out: GestureOutput) {
             match out {
-                GestureOutput::Candidate { .. } => {}
+                GestureOutput::Candidate { x, y } => {
+                    slog(&format!("drag candidate at ({x}, {y}) — watching for the summon chord"));
+                }
                 GestureOutput::Summon { x, y, kind } => {
                     self.pending_kind = kind;
                     if self.config.enabled && !self.summoned && self.panel_state.is_none() {
+                        slog(&format!("summon {kind:?} at ({x}, {y}) — showing the wheel"));
                         self.show_overlay(x, y);
+                    } else {
+                        slog(&format!(
+                            "summon {kind:?} at ({x}, {y}) SKIPPED (enabled={}, summoned={}, panel_open={})",
+                            self.config.enabled,
+                            self.summoned,
+                            self.panel_state.is_some()
+                        ));
                     }
                 }
                 GestureOutput::Resummon { kind, .. } => {
@@ -1367,6 +1550,10 @@ mod imp {
                 null(),
             );
             if hwnd.is_null() {
+                slog(&format!(
+                    "show_overlay: CreateWindowExW failed (GetLastError {})",
+                    GetLastError()
+                ));
                 return;
             }
             self.overlay = hwnd;
@@ -1389,6 +1576,10 @@ mod imp {
             }));
             let hr = RegisterDragDrop(hwnd, obj as *mut c_void);
             if hr != 0 {
+                slog(&format!(
+                    "show_overlay: RegisterDragDrop failed (HRESULT 0x{:08X}) — wheel torn down",
+                    hr as u32
+                ));
                 drop_target_release(obj);
                 DestroyWindow(hwnd);
                 self.overlay = null_mut();
@@ -1401,6 +1592,7 @@ mod imp {
 
             self.repaint_wheel();
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            slog("overlay shown + RegisterDragDrop OK — awaiting DragEnter");
             let _ = self.events.send(SensorEvent::Summoned { x: cx, y: cy });
         }
 
@@ -1408,6 +1600,7 @@ mod imp {
         unsafe fn dismiss_overlay(&mut self) {
             let hwnd = self.overlay;
             if !hwnd.is_null() {
+                slog("overlay dismissed (RevokeDragDrop + DestroyWindow)");
                 if self.registered {
                     RevokeDragDrop(hwnd);
                     self.registered = false;
@@ -1457,6 +1650,7 @@ mod imp {
         /// current COM callback returns (posted messages dispatch before
         /// OLE delivers the next DragOver), with the tick as a failsafe.
         unsafe fn request_handback(&mut self) {
+            slog("handback: this drag is not ours — revoking so the real target re-acquires it");
             self.participating = false;
             self.pending_handback = true;
             self.post_overlay(WM_URUK_HANDBACK);
@@ -1468,11 +1662,13 @@ mod imp {
             // UIPI note: drags from elevated processes never reach this
             // callback at all — there is nothing here to detect or log.
             if !data_has_hdrop(data) {
+                slog("DragEnter: no CF_HDROP in the drag — handing back");
                 self.request_handback();
                 return;
             }
             let paths = paths_via_parse(data);
             if paths.is_empty() {
+                slog("DragEnter: CF_HDROP present but zero paths parsed — handing back");
                 self.request_handback();
                 return;
             }
@@ -1483,6 +1679,12 @@ mod imp {
             };
             match (self.resolve)(&request) {
                 Some(model) => {
+                    slog(&format!(
+                        "DragEnter accepted: {} path(s), wheel kind {:?} with {} segment(s)",
+                        paths.len(),
+                        model.kind,
+                        model.segments.len()
+                    ));
                     self.model = Some(model);
                     self.paths = paths;
                     self.participating = true;
@@ -1493,7 +1695,10 @@ mod imp {
                         mime_types: vec!["CF_HDROP".to_string()],
                     });
                 }
-                None => self.request_handback(),
+                None => {
+                    slog("DragEnter: the resolver declined this drag — handing back");
+                    self.request_handback();
+                }
             }
         }
 
@@ -1585,6 +1790,12 @@ mod imp {
                                 }
                             };
                             if dispatched {
+                                slog(&format!(
+                                    "drop dispatched: kind {:?}, segment '{}', {} path(s)",
+                                    model.kind,
+                                    segment.id,
+                                    paths.len()
+                                ));
                                 self.converted = true;
                                 converted_now = true;
                                 *effect = DROPEFFECT_COPY;
@@ -1594,6 +1805,7 @@ mod imp {
                 }
             }
             if !converted_now {
+                slog("drop refused (hub / gap / outside the segments, or never confirmed)");
                 // Hub / gap / outside drop, or a drag we never
                 // confirmed: refuse, and this is the drag's end for us.
                 if self.drag_shown && !self.terminal_sent {
@@ -1813,17 +2025,30 @@ mod imp {
         resolve: WheelResolver,
     ) -> Result<(), SensorError> {
         unsafe {
+            slog_init();
+            slog(&format!(
+                "sensor run start (pid {}) — log: {}",
+                std::process::id(),
+                slog_path().display()
+            ));
             // Per-Monitor-V2, declared in code (no manifest dependency):
             // hook, OLE and window coordinates are physical pixels.
-            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let dpi_ok =
+                SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) != 0;
+            slog(&format!("SetProcessDpiAwarenessContext(PMv2) -> {dpi_ok}"));
 
             let hr = OleInitialize(null());
             if hr < 0 {
+                slog(&format!(
+                    "FAILED: OleInitialize (HRESULT 0x{:08X})",
+                    hr as u32
+                ));
                 return Err(SensorError::new(
                     "ole_init",
                     format!("OleInitialize failed: HRESULT 0x{:08X}", hr as u32),
                 ));
             }
+            slog("OleInitialize OK");
 
             let mut core = Box::new(SensorCore {
                 config,
@@ -1847,6 +2072,7 @@ mod imp {
                 toast_hwnd: null_mut(),
                 toast_until: None,
                 shutdown: false,
+                pump_logged: false,
                 pending_kind: WheelKind::Convert,
                 panel_hwnd: null_mut(),
                 panel_state: None,
@@ -1867,6 +2093,11 @@ mod imp {
             };
             if mouse_hook.is_null() || keyboard_hook.is_null() {
                 let err = GetLastError();
+                slog(&format!(
+                    "FAILED: SetWindowsHookExW (mouse null={}, keyboard null={}, GetLastError {err})",
+                    mouse_hook.is_null(),
+                    keyboard_hook.is_null()
+                ));
                 if !mouse_hook.is_null() {
                     UnhookWindowsHookEx(mouse_hook);
                 }
@@ -1877,11 +2108,64 @@ mod imp {
                     format!("SetWindowsHookExW failed (GetLastError {err})"),
                 ));
             }
+            slog("hooks installed (WH_MOUSE_LL + WH_KEYBOARD_LL)");
 
-            // 8 ms thread timer: drains the hook queue + the command
-            // channel between messages, keeping hook-to-gesture latency
-            // in single-digit milliseconds without a busy poll.
-            SetTimer(null_mut(), TIMER_ID, 8, None);
+            // The queue-drain timer lives on a message-only HOST
+            // window, whose proc runs `tick` on WM_TIMER. v1.0.0 used
+            // a thread timer — `SetTimer(null_mut(), TIMER_ID, …)` —
+            // whose requested ID the system ignores (it assigns its
+            // own, returned by SetTimer and discarded by the code),
+            // so the loop's `wParam == TIMER_ID` match never fired and
+            // `tick` never ran: the sensor was silently dead. An hWnd
+            // timer honors its ID. See the module post-mortem.
+            let host = CreateWindowExW(
+                0,
+                windows_sys::w!("UrukConvertSensorHost"),
+                null(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE,
+                null_mut(),
+                hinst,
+                null(),
+            );
+            if host.is_null() {
+                let err = GetLastError();
+                slog(&format!(
+                    "FAILED: sensor host window creation (GetLastError {err})"
+                ));
+                UnhookWindowsHookEx(mouse_hook);
+                UnhookWindowsHookEx(keyboard_hook);
+                CORE_PTR.store(0, Ordering::SeqCst);
+                OleUninitialize();
+                return Err(SensorError::new(
+                    "host_window",
+                    format!("CreateWindowExW(sensor host) failed (GetLastError {err})"),
+                ));
+            }
+            if SetTimer(host, TIMER_ID, 8, None) == 0 {
+                let err = GetLastError();
+                slog(&format!("FAILED: SetTimer(host) (GetLastError {err})"));
+                DestroyWindow(host);
+                UnhookWindowsHookEx(mouse_hook);
+                UnhookWindowsHookEx(keyboard_hook);
+                CORE_PTR.store(0, Ordering::SeqCst);
+                OleUninitialize();
+                return Err(SensorError::new(
+                    "timer_failed",
+                    format!("SetTimer(sensor host) failed (GetLastError {err})"),
+                ));
+            }
+            slog("ARMED: host timer live (8 ms) — entering the message loop");
+            // Tell the shell the sensor is genuinely alive (Settings
+            // shows it; v1.0.0 claimed "running" unconditionally).
+            let _ = core.events.send(SensorEvent::Notice {
+                code: "sensor_armed".to_string(),
+                message: "windows sensor armed (hooks live)".to_string(),
+            });
 
             let mut result: Result<(), SensorError> = Ok(());
             let mut msg: MSG = std::mem::zeroed();
@@ -1897,18 +2181,12 @@ mod imp {
                     ));
                     break;
                 }
-                if msg.message == WM_TIMER && msg.wParam == TIMER_ID {
-                    core.tick();
-                    if core.shutdown {
-                        break;
-                    }
-                } else {
-                    TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
             }
 
-            KillTimer(null_mut(), TIMER_ID);
+            KillTimer(host, TIMER_ID);
+            DestroyWindow(host);
             UnhookWindowsHookEx(mouse_hook);
             UnhookWindowsHookEx(keyboard_hook);
             core.dismiss_overlay();
@@ -1916,6 +2194,10 @@ mod imp {
             CORE_PTR.store(0, Ordering::SeqCst);
             drop(core);
             OleUninitialize();
+            match &result {
+                Ok(()) => slog("sensor run end (clean)"),
+                Err(e) => slog(&format!("sensor run end (error [{}] {})", e.code, e.message)),
+            }
             result
         }
     }
@@ -2124,18 +2406,59 @@ mod tests {
     }
 
     #[test]
-    fn modifier_before_threshold_does_not_summon() {
+    fn modifier_held_before_threshold_summons_at_candidate() {
+        // v1.0.1 held-modifier fallback (macOS parity): a chord pressed
+        // while the drag is still under the threshold summons the
+        // moment the drag confirms — no fresh edge will arrive for it.
         let mut t = GestureTracker::new();
         press(&mut t);
         assert_eq!(t.on_record(SHIFT_DOWN), None);
         assert_eq!(
             t.on_record(HookRecord::MouseMove { x: 150, y: 100 }),
+            Some(GestureOutput::Summon {
+                x: 150,
+                y: 100,
+                kind: WheelKind::Convert
+            })
+        );
+        assert!(t.is_summoned());
+    }
+
+    #[test]
+    fn modifier_held_before_press_summons_at_candidate() {
+        // Same fallback, harder case: the chord went down before the
+        // mouse press (the record arrives in Idle and must be kept).
+        let mut t = GestureTracker::new();
+        assert_eq!(t.on_record(SHIFT_DOWN), None);
+        press(&mut t);
+        assert_eq!(
+            t.on_record(HookRecord::MouseMove { x: 150, y: 100 }),
+            Some(GestureOutput::Summon {
+                x: 150,
+                y: 100,
+                kind: WheelKind::Convert
+            })
+        );
+        assert!(t.is_summoned());
+    }
+
+    #[test]
+    fn fresh_tap_after_candidate_still_summons() {
+        // The classic gesture is unchanged: candidate first, then the
+        // mid-drag modifier tap summons on its edge.
+        let mut t = GestureTracker::new();
+        press(&mut t);
+        assert_eq!(
+            t.on_record(HookRecord::MouseMove { x: 150, y: 100 }),
             Some(GestureOutput::Candidate { x: 150, y: 100 })
         );
-        // A fresh tap after the candidate exists does summon.
         assert_eq!(
             t.on_record(SHIFT_DOWN),
-            Some(GestureOutput::Summon { x: 150, y: 100, kind: WheelKind::Convert })
+            Some(GestureOutput::Summon {
+                x: 150,
+                y: 100,
+                kind: WheelKind::Convert
+            })
         );
     }
 
