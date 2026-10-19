@@ -229,11 +229,17 @@ fetch_magick_macos() {
     echo "WARN: brew install imagemagick failed; sidecar pending." >&2; return 0; }
   brew list dylibbundler >/dev/null 2>&1 || brew install dylibbundler || {
     echo "WARN: brew install dylibbundler failed; sidecar pending." >&2; return 0; }
-  local prefix ver home
+  local prefix ver home verdir
   prefix="$(brew --prefix imagemagick)"
-  ver="$(ls "$prefix/lib" | grep -oE 'ImageMagick-[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-  if [ -z "$ver" ] || [ ! -f "$prefix/bin/magick" ]; then
-    echo "WARN: unexpected Homebrew ImageMagick layout under $prefix." >&2
+  # Discover the versioned module tree and the binary by find, not by
+  # parsing `ls` (the first CI attempt's name guess missed the real
+  # layout of the 7.1.2-30 bottle and bailed). On failure, dump the
+  # actual layout to the log so the next diagnosis is not blind.
+  verdir="$(find "$prefix/lib" -maxdepth 1 -type d -name 'ImageMagick-*' 2>/dev/null | head -1 || true)"
+  ver="$(basename "$verdir" 2>/dev/null || true)"
+  if [ -z "$verdir" ] || [ ! -f "$prefix/bin/magick" ]; then
+    echo "WARN: unexpected Homebrew ImageMagick layout under $prefix:" >&2
+    ls -la "$prefix" "$prefix/bin" "$prefix/lib" >&2 || true
     return 0
   fi
   home="$DEST/magick-home"

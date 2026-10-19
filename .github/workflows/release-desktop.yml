@@ -140,8 +140,9 @@ jobs:
           fi
           # Launch smoke ONLY: CI runners cannot grant Accessibility, so
           # the drag sensor degrades by design; what we prove here is
-          # that the agent process starts and stays alive.
-          "$APP/Contents/MacOS/uruk-convert" &
+          # that the agent process starts and stays alive. Output is
+          # captured so an early exit leaves evidence, not silence.
+          "$APP/Contents/MacOS/uruk-convert" > /tmp/uruk-launch.log 2>&1 &
           PID=$!
           sleep 6
           if kill -0 "$PID" 2>/dev/null; then
@@ -151,6 +152,9 @@ jobs:
             echo "LAUNCH SMOKE: agent exited within 6s"
             wait "$PID" || true
           fi
+          echo "--- agent output ---"
+          cat /tmp/uruk-launch.log || true
+          ls -t ~/Library/Logs/DiagnosticReports/ 2>/dev/null | head -3 || true
 
       - name: Windows post-build launch smoke
         if: runner.os == 'Windows'
