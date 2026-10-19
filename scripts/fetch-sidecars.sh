@@ -18,9 +18,10 @@
 # truth for obtaining them — the release workflow calls it per matrix entry.
 #
 # Upstreams (all shipped UNMODIFIED as standalone executables next to the app):
-#   FFmpeg   — Linux: johnvansickle.com static builds (GPLv3 build);
+#   FFmpeg   — Linux: BtbN FFmpeg-Builds static GPL builds (GitHub);
 #              Windows: gyan.dev "release essentials" (GPLv3 build);
-#              macOS: evermeet.cx / osxexperts static builds.
+#              macOS: osxexperts static builds (evermeet.cx retired
+#              its builds in 2025 — HTTP 410).
 #   7-Zip    — official ip7z/7zip GitHub releases (LGPL), including the
 #              macOS tarball (7z*-mac.tar.xz, universal 7zz).
 #   Pandoc   — official jgm/pandoc GitHub releases (GPLv2+): a single
@@ -86,37 +87,40 @@ MAGICK_WIN_PINNED="ImageMagick-7.1.2-11-portable-Q16-x64.7z"
 
 fetch_ffmpeg() {
   case "$TRIPLE" in
-    x86_64-unknown-linux-gnu)
-      curl -fL --retry 3 -o "$TMP/ff.tar.xz" https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+    x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu)
+      # BtbN FFmpeg-Builds (GitHub CDN): static GPL builds, ffmpeg and
+      # ffprobe in one tarball. (johnvansickle's single small server
+      # stalls transfers for minutes at a time — it hung the first
+      # v1.0.0 CI run's fetch step for 20+ minutes.)
+      local arch="linux64"
+      [ "$TRIPLE" = "aarch64-unknown-linux-gnu" ] && arch="linuxarm64"
+      curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 \
+        -o "$TMP/ff.tar.xz" "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-${arch}-gpl.tar.xz"
       tar -xJf "$TMP/ff.tar.xz" -C "$TMP"
-      cp "$TMP"/ffmpeg-*-amd64-static/ffmpeg  "$DEST/uruk-ffmpeg-$TRIPLE"
-      cp "$TMP"/ffmpeg-*-amd64-static/ffprobe "$DEST/uruk-ffprobe-$TRIPLE"
-      ;;
-    aarch64-unknown-linux-gnu)
-      curl -fL --retry 3 -o "$TMP/ff.tar.xz" https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz
-      tar -xJf "$TMP/ff.tar.xz" -C "$TMP"
-      cp "$TMP"/ffmpeg-*-arm64-static/ffmpeg  "$DEST/uruk-ffmpeg-$TRIPLE"
-      cp "$TMP"/ffmpeg-*-arm64-static/ffprobe "$DEST/uruk-ffprobe-$TRIPLE"
+      cp "$(find "$TMP" -path '*/bin/ffmpeg' -type f | head -1)"  "$DEST/uruk-ffmpeg-$TRIPLE"
+      cp "$(find "$TMP" -path '*/bin/ffprobe' -type f | head -1)" "$DEST/uruk-ffprobe-$TRIPLE"
       ;;
     x86_64-pc-windows-msvc)
-      curl -fL --retry 3 -o "$TMP/ff.zip" https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+      curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 -o "$TMP/ff.zip" https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
       unzip -q "$TMP/ff.zip" -d "$TMP"
       cp "$TMP"/ffmpeg-*-essentials_build/bin/ffmpeg.exe  "$DEST/uruk-ffmpeg-$TRIPLE.exe"
       cp "$TMP"/ffmpeg-*-essentials_build/bin/ffprobe.exe "$DEST/uruk-ffprobe-$TRIPLE.exe"
       ;;
     x86_64-apple-darwin)
-      curl -fL --retry 3 -o "$TMP/ffmpeg.zip" https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip
+      # evermeet.cx retired its FFmpeg builds (HTTP 410 since 2025);
+      # osxexperts publishes Intel builds in the same zip layout.
+      curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 -o "$TMP/ffmpeg.zip" https://www.osxexperts.net/ffmpeg7intel.zip
       unzip -q "$TMP/ffmpeg.zip" -d "$TMP"
       cp "$TMP/ffmpeg" "$DEST/uruk-ffmpeg-$TRIPLE"
-      curl -fL --retry 3 -o "$TMP/ffprobe.zip" https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip
+      curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 -o "$TMP/ffprobe.zip" https://www.osxexperts.net/ffprobe7intel.zip
       unzip -q "$TMP/ffprobe.zip" -d "$TMP"
       cp "$TMP/ffprobe" "$DEST/uruk-ffprobe-$TRIPLE"
       ;;
     aarch64-apple-darwin)
-      curl -fL --retry 3 -o "$TMP/ffmpeg.zip" https://www.osxexperts.net/ffmpeg7arm.zip
+      curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 -o "$TMP/ffmpeg.zip" https://www.osxexperts.net/ffmpeg7arm.zip
       unzip -q "$TMP/ffmpeg.zip" -d "$TMP"
       cp "$TMP/ffmpeg" "$DEST/uruk-ffmpeg-$TRIPLE"
-      curl -fL --retry 3 -o "$TMP/ffprobe.zip" https://www.osxexperts.net/ffprobe7arm.zip
+      curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 -o "$TMP/ffprobe.zip" https://www.osxexperts.net/ffprobe7arm.zip
       unzip -q "$TMP/ffprobe.zip" -d "$TMP"
       cp "$TMP/ffprobe" "$DEST/uruk-ffprobe-$TRIPLE"
       ;;
@@ -126,25 +130,43 @@ fetch_ffmpeg() {
 fetch_7z() {
   case "$TRIPLE" in
     x86_64-unknown-linux-gnu)
-      curl -fL --retry 3 -o "$TMP/7z.tar.xz" "https://github.com/ip7z/7zip/releases/download/${SEVENZIP_TAG}/7z${SEVENZIP_VER//./}-linux-x64.tar.xz"
+      curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 -o "$TMP/7z.tar.xz" "https://github.com/ip7z/7zip/releases/download/${SEVENZIP_TAG}/7z${SEVENZIP_VER//./}-linux-x64.tar.xz"
       tar -xJf "$TMP/7z.tar.xz" -C "$TMP"
       cp "$TMP/7zz" "$DEST/uruk-7z-$TRIPLE"
       ;;
     aarch64-unknown-linux-gnu)
-      curl -fL --retry 3 -o "$TMP/7z.tar.xz" "https://github.com/ip7z/7zip/releases/download/${SEVENZIP_TAG}/7z${SEVENZIP_VER//./}-linux-arm64.tar.xz"
+      curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 -o "$TMP/7z.tar.xz" "https://github.com/ip7z/7zip/releases/download/${SEVENZIP_TAG}/7z${SEVENZIP_VER//./}-linux-arm64.tar.xz"
       tar -xJf "$TMP/7z.tar.xz" -C "$TMP"
       cp "$TMP/7zz" "$DEST/uruk-7z-$TRIPLE"
       ;;
     x86_64-pc-windows-msvc)
-      curl -fL --retry 3 -o "$TMP/7z.zip" "https://github.com/ip7z/7zip/releases/download/${SEVENZIP_TAG}/7z${SEVENZIP_VER//./}-x64.zip" || \
-      curl -fL --retry 3 -o "$TMP/7z.zip" "https://www.7-zip.org/a/7z${SEVENZIP_VER//./}-x64.zip"
-      unzip -q "$TMP/7z.zip" -d "$TMP/7zwin" || mkdir -p "$TMP/7zwin"
-      cp "$TMP/7zwin/7z.exe" "$DEST/uruk-7z-$TRIPLE.exe" 2>/dev/null || \
-        { echo "WARN: 7z.exe not found in archive; Windows 7-Zip sidecar pending" >&2; }
+      # 7-Zip publishes NO plain x64 .zip: the x64 .exe is a
+      # self-extracting installer. CI runners ship 7-Zip themselves —
+      # use it to open the installer and take the full 7z.exe (+ its
+      # 7z.dll). Fallback: the "extra" archive's standalone 7za.exe
+      # (covers ZIP/TAR/GZIP; no RAR — PARITY already leaves RAR
+      # unproven). Failure of both routes is a WARN, not a build kill.
+      mkdir -p "$TMP/7zwin"
+      if command -v 7z >/dev/null 2>&1 && \
+         curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 -o "$TMP/7z-setup.exe" "https://github.com/ip7z/7zip/releases/download/${SEVENZIP_TAG}/7z${SEVENZIP_VER//./}-x64.exe"; then
+        7z x -y -o"$TMP/7zwin" "$TMP/7z-setup.exe" >/dev/null 2>&1 || true
+      fi
+      if [ -f "$TMP/7zwin/7z.exe" ]; then
+        cp "$TMP/7zwin/7z.exe" "$DEST/uruk-7z-$TRIPLE.exe"
+        cp "$TMP/7zwin/7z.dll" "$DEST/" 2>/dev/null || true
+      elif command -v 7z >/dev/null 2>&1 && \
+           curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 -o "$TMP/7zextra.7z" "https://github.com/ip7z/7zip/releases/download/${SEVENZIP_TAG}/7z${SEVENZIP_VER//./}-extra.7z" && \
+           7z x -y -o"$TMP/7zwin" "$TMP/7zextra.7z" >/dev/null 2>&1 && \
+           [ -f "$TMP/7zwin/7za.exe" ]; then
+        cp "$TMP/7zwin/7za.exe" "$DEST/uruk-7z-$TRIPLE.exe"
+        echo "NOTE: Windows 7-Zip sidecar is 7za.exe (standalone): ZIP/TAR/GZIP covered, RAR is not." >&2
+      else
+        echo "WARN: could not obtain a Windows 7-Zip sidecar (installer + extra routes both failed)." >&2
+      fi
       ;;
     *-apple-darwin)
       # 7-Zip ships an official macOS tarball: a universal `7zz`.
-      curl -fL --retry 3 -o "$TMP/7z.tar.xz" "https://github.com/ip7z/7zip/releases/download/${SEVENZIP_TAG}/7z${SEVENZIP_VER//./}-mac.tar.xz"
+      curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 -o "$TMP/7z.tar.xz" "https://github.com/ip7z/7zip/releases/download/${SEVENZIP_TAG}/7z${SEVENZIP_VER//./}-mac.tar.xz"
       tar -xJf "$TMP/7z.tar.xz" -C "$TMP"
       cp "$TMP/7zz" "$DEST/uruk-7z-$TRIPLE"
       ;;
@@ -161,7 +183,7 @@ fetch_magick_windows() {
   found="$(printf '%s' "$page" | grep -oE 'ImageMagick-7\.[0-9]+\.[0-9]+-[0-9]+-portable-Q16-x64\.7z' | head -1 || true)"
   [ -n "$found" ] && name="$found"
   echo "fetch-magick: Windows portable build: $name"
-  if ! curl -fL --retry 3 -o "$TMP/magick.7z" "https://imagemagick.org/archive/binaries/$name"; then
+  if ! curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 -o "$TMP/magick.7z" "https://imagemagick.org/archive/binaries/$name"; then
     echo "WARN: could not download $name; Windows ImageMagick sidecar pending (see PARITY.md)." >&2
     return 0
   fi
@@ -300,7 +322,7 @@ fetch_poppler() {
       fi
       url="https://github.com/oschwartz10612/poppler-windows/releases/download/$tag/Release-${tag#v}.zip"
       echo "fetch-poppler: $url"
-      if curl -fL --retry 3 -o "$TMP/poppler.zip" "$url"; then
+      if curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 -o "$TMP/poppler.zip" "$url"; then
         unzip -q "$TMP/poppler.zip" -d "$TMP/poppler"
         local bindir
         bindir="$(find "$TMP/poppler" -type d -name bin | head -1 || true)"
@@ -326,29 +348,30 @@ fetch_poppler() {
 fetch_pandoc() {
   case "$TRIPLE" in
     x86_64-unknown-linux-gnu)
-      curl -fL --retry 3 -o "$TMP/pandoc.tar.gz" "https://github.com/jgm/pandoc/releases/download/${PANDOC_VER}/pandoc-${PANDOC_VER}-linux-amd64.tar.gz"
+      curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 -o "$TMP/pandoc.tar.gz" "https://github.com/jgm/pandoc/releases/download/${PANDOC_VER}/pandoc-${PANDOC_VER}-linux-amd64.tar.gz"
       tar -xzf "$TMP/pandoc.tar.gz" -C "$TMP"
       cp "$TMP/pandoc-${PANDOC_VER}/bin/pandoc" "$DEST/uruk-pandoc-$TRIPLE"
       ;;
     aarch64-unknown-linux-gnu)
-      curl -fL --retry 3 -o "$TMP/pandoc.tar.gz" "https://github.com/jgm/pandoc/releases/download/${PANDOC_VER}/pandoc-${PANDOC_VER}-linux-arm64.tar.gz"
+      curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 -o "$TMP/pandoc.tar.gz" "https://github.com/jgm/pandoc/releases/download/${PANDOC_VER}/pandoc-${PANDOC_VER}-linux-arm64.tar.gz"
       tar -xzf "$TMP/pandoc.tar.gz" -C "$TMP"
       cp "$TMP/pandoc-${PANDOC_VER}/bin/pandoc" "$DEST/uruk-pandoc-$TRIPLE"
       ;;
     x86_64-pc-windows-msvc)
-      curl -fL --retry 3 -o "$TMP/pandoc.zip" "https://github.com/jgm/pandoc/releases/download/${PANDOC_VER}/pandoc-${PANDOC_VER}-windows-x86_64.zip"
+      curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 -o "$TMP/pandoc.zip" "https://github.com/jgm/pandoc/releases/download/${PANDOC_VER}/pandoc-${PANDOC_VER}-windows-x86_64.zip"
       unzip -q "$TMP/pandoc.zip" -d "$TMP"
       cp "$TMP/pandoc-${PANDOC_VER}/pandoc.exe" "$DEST/uruk-pandoc-$TRIPLE.exe"
       ;;
     x86_64-apple-darwin)
-      curl -fL --retry 3 -o "$TMP/pandoc.zip" "https://github.com/jgm/pandoc/releases/download/${PANDOC_VER}/pandoc-${PANDOC_VER}-x86_64-macOS.zip"
+      curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 -o "$TMP/pandoc.zip" "https://github.com/jgm/pandoc/releases/download/${PANDOC_VER}/pandoc-${PANDOC_VER}-x86_64-macOS.zip"
       unzip -q "$TMP/pandoc.zip" -d "$TMP"
-      cp "$TMP/pandoc-${PANDOC_VER}/bin/pandoc" "$DEST/uruk-pandoc-$TRIPLE"
+      # The macOS zips put the binary at the folder root (no bin/).
+      cp "$(find "$TMP/pandoc-${PANDOC_VER}" -name pandoc -type f | head -1)" "$DEST/uruk-pandoc-$TRIPLE"
       ;;
     aarch64-apple-darwin)
-      curl -fL --retry 3 -o "$TMP/pandoc.zip" "https://github.com/jgm/pandoc/releases/download/${PANDOC_VER}/pandoc-${PANDOC_VER}-arm64-macOS.zip"
+      curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 -o "$TMP/pandoc.zip" "https://github.com/jgm/pandoc/releases/download/${PANDOC_VER}/pandoc-${PANDOC_VER}-arm64-macOS.zip"
       unzip -q "$TMP/pandoc.zip" -d "$TMP"
-      cp "$TMP/pandoc-${PANDOC_VER}/bin/pandoc" "$DEST/uruk-pandoc-$TRIPLE"
+      cp "$(find "$TMP/pandoc-${PANDOC_VER}" -name pandoc -type f | head -1)" "$DEST/uruk-pandoc-$TRIPLE"
       ;;
   esac
 }
