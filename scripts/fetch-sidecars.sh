@@ -229,23 +229,24 @@ fetch_magick_macos() {
     echo "WARN: brew install imagemagick failed; sidecar pending." >&2; return 0; }
   brew list dylibbundler >/dev/null 2>&1 || brew install dylibbundler || {
     echo "WARN: brew install dylibbundler failed; sidecar pending." >&2; return 0; }
-  local prefix ver home verdir
+  local prefix home tree moddir cfgdir
   prefix="$(brew --prefix imagemagick)"
-  # Discover the versioned module tree and the binary by find, not by
-  # parsing `ls` (the first CI attempt's name guess missed the real
-  # layout of the 7.1.2-30 bottle and bailed). On failure, dump the
-  # actual layout to the log so the next diagnosis is not blind.
-  verdir="$(find "$prefix/lib" -maxdepth 1 -type d -name 'ImageMagick-*' 2>/dev/null | head -1 || true)"
-  ver="$(basename "$verdir" 2>/dev/null || true)"
-  if [ -z "$verdir" ] || [ ! -f "$prefix/bin/magick" ]; then
+  # The current bottle layout (7.1.2-30, proven from CI logs): a
+  # VERSIONLESS lib/ImageMagick/ holding config-Q16HDRI/ and
+  # modules-Q16HDRI/{coders,filters}. Discover the subdirs by find; on
+  # failure dump the actual layout to the log (never bail silent).
+  tree="$prefix/lib/ImageMagick"
+  moddir="$(find "$tree" -maxdepth 1 -type d -name 'modules-*' 2>/dev/null | head -1 || true)"
+  cfgdir="$(find "$tree" -maxdepth 1 -type d -name 'config-*' 2>/dev/null | head -1 || true)"
+  if [ -z "$moddir" ] || [ -z "$cfgdir" ] || [ ! -f "$prefix/bin/magick" ]; then
     echo "WARN: unexpected Homebrew ImageMagick layout under $prefix:" >&2
-    ls -la "$prefix" "$prefix/bin" "$prefix/lib" >&2 || true
+    ls -la "$prefix" "$prefix/bin" "$prefix/lib" "$tree" >&2 || true
     return 0
   fi
   home="$DEST/magick-home"
   rm -rf "$home/lib" "$home/lib-dylibs" "$home/etc"
   mkdir -p "$home/lib" "$home/etc"
-  cp -R "$prefix/lib/$ver" "$home/lib/"
+  cp -R "$tree" "$home/lib/"
   # etc config (policy.xml & friends) lives in the shared brew prefix.
   if [ -d "$(brew --prefix)/etc/ImageMagick-7" ]; then
     cp -R "$(brew --prefix)/etc/ImageMagick-7" "$home/etc/"
@@ -260,7 +261,7 @@ fetch_magick_macos() {
   # Relocate the coder/filter modules the same way: each .so must find
   # the bundled dylibs instead of the Cellar paths it was linked with.
   local so lib orig base
-  find "$home/lib/$ver" -name '*.so' | while read -r so; do
+  find "$home/lib/ImageMagick" -name '*.so' | while read -r so; do
     for lib in "$home"/lib-dylibs/*.dylib; do
       [ -f "$lib" ] || continue
       base="$(basename "$lib")"
@@ -276,7 +277,7 @@ fetch_magick_macos() {
   find "$home/lib-dylibs" -name '*.dylib' -type f 2>/dev/null | while read -r f; do
     codesign --force --sign - "$f" >/dev/null 2>&1 || true
   done
-  find "$home/lib/$ver" \( -name '*.so' -o -name '*.dylib' \) -type f 2>/dev/null | while read -r f; do
+  find "$home/lib/ImageMagick" \( -name '*.so' -o -name '*.dylib' \) -type f 2>/dev/null | while read -r f; do
     codesign --force --sign - "$f" >/dev/null 2>&1 || true
   done
   codesign --force --sign - "$DEST/magick-bin-$TRIPLE" >/dev/null 2>&1 || true
@@ -289,16 +290,17 @@ fetch_magick_macos() {
 # (magick-home/) and execs the relocated binary.
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 HOME_TREE="$DIR/magick-home"
+TREE="$HOME_TREE/lib/ImageMagick"
 export MAGICK_HOME="$HOME_TREE"
-for d in "$HOME_TREE"/lib/ImageMagick-*; do
-  [ -d "$d" ] || continue
-  export MAGICK_CONFIGURE_PATH="$d/config-Q16"
-  export MAGICK_CODER_MODULE_PATH="$d/modules-Q16/coders"
-  export MAGICK_FILTER_MODULE_PATH="$d/modules-Q16/filters"
-done
+export MAGICK_CONFIGURE_PATH="$TREE/__CFGDIR__"
+export MAGICK_CODER_MODULE_PATH="$TREE/__MODDIR__/coders"
+export MAGICK_FILTER_MODULE_PATH="$TREE/__MODDIR__/filters"
 exec "$DIR/magick-bin-__TRIPLE__" "$@"
 EOF
-  sed -i '' "s/__TRIPLE__/$TRIPLE/" "$DEST/uruk-magick-$TRIPLE"
+  sed -i '' -e "s/__TRIPLE__/$TRIPLE/" \
+            -e "s/__MODDIR__/$(basename "$moddir")/" \
+            -e "s/__CFGDIR__/$(basename "$cfgdir")/" \
+            "$DEST/uruk-magick-$TRIPLE"
   chmod +x "$DEST/uruk-magick-$TRIPLE" "$DEST/magick-bin-$TRIPLE"
   echo "fetch-magick: macOS bundle staged (wrapper + magick-bin + magick-home tree)."
 }
