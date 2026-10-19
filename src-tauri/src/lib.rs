@@ -1865,6 +1865,15 @@ fn start_sensor(app: &AppHandle, state: &AppState) {
 }
 
 fn start_wayland_tier(app: &AppHandle, state: &AppState, settings: &AgentSettings) {
+    // The orb tier exists only on Linux (the drag-sensor's `wayland`
+    // module is Linux-only); other platforms never report a Wayland
+    // session, so this is a deliberate no-op there.
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, state, settings);
+    }
+    #[cfg(target_os = "linux")]
+    {
     use uruk_drag_sensor::wayland::{self, OrbEvent, WaylandTier};
     let info = wayland::probe_tier();
     let lang = SensorLang::from_code(&settings.lang);
@@ -1907,6 +1916,7 @@ fn start_wayland_tier(app: &AppHandle, state: &AppState, settings: &AgentSetting
         Err(e) => {
             eprintln!("uruk-convert: wayland orb failed to start: {}", e.message);
         }
+    }
     }
 }
 

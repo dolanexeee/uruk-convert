@@ -81,9 +81,10 @@ trap 'rm -rf "$TMP"' EXIT
 SEVENZIP_VER="25.01"
 SEVENZIP_TAG="25.01"
 PANDOC_VER="3.5"
-# Pinned fallback for the Windows ImageMagick portable build; the fetch
-# first tries to discover the current filename from the download page.
-MAGICK_WIN_PINNED="ImageMagick-7.1.2-11-portable-Q16-x64.7z"
+# Pinned fallback version for the Windows ImageMagick portable build;
+# the fetch first discovers the current release tag from the GitHub
+# redirect (ImageMagick distributes its binaries via GitHub releases).
+MAGICK_WIN_PINNED_VER="7.1.2-34"
 
 fetch_ffmpeg() {
   case "$TRIPLE" in
@@ -174,16 +175,20 @@ fetch_7z() {
 }
 
 fetch_magick_windows() {
-  # Official portable STATIC build: one self-contained magick.exe.
-  # Discover the current filename from the download page; fall back to
-  # the pinned name. Any failure is a WARN (the build continues; the
-  # engine then reports ImageMagick missing on Windows, as documented).
-  local name="$MAGICK_WIN_PINNED" page found=""
-  page="$(curl -fsL --max-time 60 https://imagemagick.org/script/download.php 2>/dev/null || true)"
-  found="$(printf '%s' "$page" | grep -oE 'ImageMagick-7\.[0-9]+\.[0-9]+-[0-9]+-portable-Q16-x64\.7z' | head -1 || true)"
-  [ -n "$found" ] && name="$found"
-  echo "fetch-magick: Windows portable build: $name"
-  if ! curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 -o "$TMP/magick.7z" "https://imagemagick.org/archive/binaries/$name"; then
+  # Official portable STATIC build: one self-contained magick.exe,
+  # distributed as a GitHub release asset of ImageMagick/ImageMagick.
+  # Discover the current tag from the /releases/latest redirect; fall
+  # back to the pinned version. Any failure is a WARN (the build
+  # continues; the engine then reports ImageMagick missing on Windows,
+  # as documented).
+  local ver="$MAGICK_WIN_PINNED_VER" latest tag name url
+  latest="$(curl -fsIL -o /dev/null -w '%{url_effective}' https://github.com/ImageMagick/ImageMagick/releases/latest 2>/dev/null || true)"
+  tag="$(printf '%s' "$latest" | grep -oE '7\.[0-9]+\.[0-9]+-[0-9]+' | head -1 || true)"
+  [ -n "$tag" ] && ver="$tag"
+  name="ImageMagick-${ver}-portable-Q16-x64.7z"
+  url="https://github.com/ImageMagick/ImageMagick/releases/download/${ver}/${name}"
+  echo "fetch-magick: Windows portable build: $url"
+  if ! curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 -o "$TMP/magick.7z" "$url"; then
     echo "WARN: could not download $name; Windows ImageMagick sidecar pending (see PARITY.md)." >&2
     return 0
   fi
@@ -365,13 +370,14 @@ fetch_pandoc() {
     x86_64-apple-darwin)
       curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 -o "$TMP/pandoc.zip" "https://github.com/jgm/pandoc/releases/download/${PANDOC_VER}/pandoc-${PANDOC_VER}-x86_64-macOS.zip"
       unzip -q "$TMP/pandoc.zip" -d "$TMP"
-      # The macOS zips put the binary at the folder root (no bin/).
-      cp "$(find "$TMP/pandoc-${PANDOC_VER}" -name pandoc -type f | head -1)" "$DEST/uruk-pandoc-$TRIPLE"
+      # The macOS zips carry no versioned folder at all — find the
+      # binary wherever it landed in the scratch dir.
+      cp "$(find "$TMP" -name pandoc -type f | head -1)" "$DEST/uruk-pandoc-$TRIPLE"
       ;;
     aarch64-apple-darwin)
       curl -fL --retry 3 --connect-timeout 20 --speed-time 60 --speed-limit 2048 -o "$TMP/pandoc.zip" "https://github.com/jgm/pandoc/releases/download/${PANDOC_VER}/pandoc-${PANDOC_VER}-arm64-macOS.zip"
       unzip -q "$TMP/pandoc.zip" -d "$TMP"
-      cp "$(find "$TMP/pandoc-${PANDOC_VER}" -name pandoc -type f | head -1)" "$DEST/uruk-pandoc-$TRIPLE"
+      cp "$(find "$TMP" -name pandoc -type f | head -1)" "$DEST/uruk-pandoc-$TRIPLE"
       ;;
   esac
 }

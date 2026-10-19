@@ -117,6 +117,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ghostscript poppler-utils libreoffice
+          # Ubuntu's stock ImageMagick policy.xml forbids the PDF coder;
+          # the suite only uses `convert` to BAKE FIXTURES (the engine's
+          # own PDF paths run on poppler/Ghostscript), so relax it here,
+          # in the throwaway CI machine only.
+          sudo sed -i 's|<policy domain="coder" rights="none" pattern="PDF" />|<policy domain="coder" rights="read\|write" pattern="PDF" />|' /etc/ImageMagick-6/policy.xml
           npm run test:engine
 
       - name: Build Tauri app
