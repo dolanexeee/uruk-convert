@@ -302,7 +302,26 @@ EOF
             -e "s/__CFGDIR__/$(basename "$cfgdir")/" \
             "$DEST/uruk-magick-$TRIPLE"
   chmod +x "$DEST/uruk-magick-$TRIPLE" "$DEST/magick-bin-$TRIPLE"
-  echo "fetch-magick: macOS bundle staged (wrapper + magick-bin + magick-home tree)."
+  # Self-test the staged bundle exactly as the engine will run it. A
+  # bundle that starts but cannot convert (first attempt: the binary
+  # ran, its coder modules did not load) is worse than none — the app
+  # would report ImageMagick present but broken — so on failure print
+  # the evidence and degrade to the honest PATH fallback.
+  if ! "$DEST/uruk-magick-$TRIPLE" -size 8x8 xc:#3366ff "$TMP/magick-selftest.png" 2>"$TMP/magick-selftest.err"; then
+    echo "WARN: staged ImageMagick bundle failed its self-test; degrading to PATH fallback:" >&2
+    cat "$TMP/magick-selftest.err" >&2 || true
+    echo "--- staged modules (first entries):" >&2
+    ls "$home/lib/ImageMagick/"*/coders 2>/dev/null | head -6 >&2 || true
+    local xc
+    xc="$(find "$home/lib/ImageMagick" -name 'xc.*' -type f 2>/dev/null | head -1 || true)"
+    if [ -n "$xc" ]; then echo "--- otool -L $xc:" >&2; otool -L "$xc" >&2 || true; fi
+    rm -f "$DEST/uruk-magick-$TRIPLE" "$DEST/magick-bin-$TRIPLE"
+    rm -rf "$home"
+    mkdir -p "$home"
+    echo "ImageMagick bundle self-test failed at release-build time; system magick via PATH is used instead. See PARITY.md." > "$home/README.txt"
+    return 0
+  fi
+  echo "fetch-magick: macOS bundle staged + self-test conversion passed."
 }
 
 fetch_magick() {
