@@ -60,11 +60,15 @@ ImageMagick build cannot write AVIF).
 - [x] AVIF → JPG, PNG, WebP, TIFF, BMP, PDF
 - [x] BMP → JPG, PNG, WebP, TIFF, AVIF, PDF
 - [x] SVG → JPG, PNG, WebP, TIFF, AVIF, BMP, PDF
-- [~] JPG/PNG/WebP/TIFF/AVIF/BMP/SVG → HEIC — implemented, but HEIC
-  *encoding* needs an encoder the open toolchains do not ship on
-  Linux/Windows (no HEIF muxer in FFmpeg builds, decode-only libheif in
-  ImageMagick). The engine refuses with a plain-language error today;
-  a platform-native encoder is a later stage.
+- [~] JPG/PNG/WebP/TIFF/AVIF/BMP/SVG → HEIC — the engine probes at
+  runtime for a real encoder and uses the first it finds: Apple's
+  `sips` on macOS, else an ImageMagick HEIC writer, else an FFmpeg
+  HEIF muxer. PROVEN on the Linux release build: the v1.0.0 CI engine
+  suite ran the HEIC-encode check for real (99 passed, 0 known gaps;
+  earlier local runs recorded it as the suite's single known gap).
+  The macOS `sips` route is implemented (target-gated unit tests) but
+  not yet exercised on a real Mac; where no encoder exists the engine
+  refuses with a plain-language error — never a fake file.
 - [ ] HEIC → JPG, PNG, WebP, TIFF, AVIF, BMP, PDF — decoding is present
   in the bundled tools; no HEIC fixture can be generated with open tools
   locally, so this row stays unchecked until it is proven.
@@ -445,3 +449,67 @@ table.
   compositor ban on bystander drag observation covers tools and
   actions too); the fallback window keeps the full converter, and
   the engine tools remain available to any future surface.
+
+## Platform notes (Stage 5 — v1.0.0 CI release)
+
+Shipped 2026-10-19: tag `v1.0.0` on commit `e3b737b`, GitHub Actions
+run `39319647515` — all four matrix jobs green after five fix rounds
+(each round driven by the previous run's job logs; no test was
+weakened at any point). The seven release assets, all built by that
+single run:
+
+| Asset | Bytes |
+|---|---|
+| `Uruk.Convert_1.0.0_amd64.deb` | 181,389,640 |
+| `Uruk.Convert-1.0.0-1.x86_64.rpm` | 181,387,530 |
+| `Uruk.Convert_1.0.0_amd64.AppImage` | 240,392,696 |
+| `Uruk.Convert_1.0.0_x64-setup.exe` | 114,356,081 |
+| `Uruk.Convert_1.0.0_x64_en-US.msi` | 164,937,534 |
+| `Uruk.Convert_1.0.0_x64.dmg` | 78,288,740 |
+| `Uruk.Convert_1.0.0_aarch64.dmg` | 84,579,340 |
+
+- **Linux — fully proven on the shipped artifact.** The engine suite
+  ran in CI on the tagged tree: **99 passed, 0 failed, 0 known gaps**
+  (the HEIC-encode check included). The release `.deb` was then
+  downloaded back from GitHub, extracted, and its shipped binary ran
+  the complete X11 E2E — all three scenarios (convert wheel, tools
+  wheel + Crop panel at exactly 100×80, actions wheel + Copy Path
+  clipboard) passed, wheel summon 8–12 ms. Bundled sidecars: FFmpeg
+  (BtbN full-GPL static — larger than the minimal static build used
+  before, which is why the Linux installers grew), Pandoc 3.5, 7-Zip.
+  ImageMagick/Ghostscript/poppler come from the distro (the .deb
+  declares them). **Caveat:** the engine's image→PDF path goes
+  through ImageMagick, and stock Debian/Ubuntu `policy.xml` forbids
+  IM's PDF coder — on such a system image→PDF alone fails until the
+  user relaxes that one policy line; every other PDF path uses
+  poppler/Ghostscript and is unaffected. (CI relaxes the policy only
+  to bake test fixtures.)
+- **Windows — built and smoke-proven; drag runtime pending a real
+  machine.** Every sidecar staged and exercised in CI: FFmpeg,
+  Pandoc, full 7-Zip, poppler (12 tools + DLLs, `pdftoppm` 26.09.0
+  runs), and ImageMagick's official portable static build (fetched
+  from ImageMagick's GitHub releases) which performed a real
+  PNG→JPG conversion in the job. Post-build launch smoke: the agent
+  process starts and stays alive. The mid-drag wheel itself cannot
+  be exercised by a CI runner — it remains **implemented,
+  build-proven, runtime pending**.
+- **macOS — built and partially smoke-proven; drag runtime pending a
+  real machine.** FFmpeg/FFprobe (osxexperts static), Pandoc 3.5
+  and 7-Zip staged and version-proven inside the shipped .app.
+  ImageMagick is **not bundled**: a three-round attempt to relocate
+  the Homebrew bottle produced a binary that runs but whose coder
+  modules do not load from the staged tree, so the fetch now
+  self-tests and degrades honestly — macOS resolves ImageMagick from
+  PATH (`brew install imagemagick`), as does poppler. HEIC encode
+  routes via `sips` (implemented, unit-tested, not yet run on a real
+  Mac). Launch smoke in the headless runner (no window server): the
+  agent starts and the drag sensor runs (captured log line), then
+  the process intermittently aborts on an AppKit `NSMenu` assertion
+  — the x86_64 build stayed alive in the final run, the arm64 build
+  in an earlier one. This is recorded as a CI-environment limit,
+  not a pass: **first launch on a real Mac is the verdict.**
+- **LibreOffice — final decision: system-detected, never bundled**
+  (≈284 MB). The in-app tools report states the policy in plain
+  language and shows LibreOffice detected/absent; without it the
+  document/slide/spreadsheet rows are unavailable with a clear
+  message, everything else works.

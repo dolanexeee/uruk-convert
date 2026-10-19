@@ -1,19 +1,19 @@
 [
   {
-    "ts": 1792436710,
+    "ts": 1792442531,
     "input_name": "fixture.png",
-    "input_path": "/tmp/uruk-e2e-QgAQmM/fixture.png",
-    "output_path": "/tmp/uruk-e2e-QgAQmM/fixture.converted.jpg",
+    "input_path": "/tmp/uruk-e2e-LkEbeI/fixture.png",
+    "output_path": "/tmp/uruk-e2e-LkEbeI/fixture.converted.jpg",
     "target": "jpg",
     "status": "done",
     "error": null,
     "origin": "overlay"
   },
   {
-    "ts": 1792436715,
+    "ts": 1792442537,
     "input_name": "fixture.png",
-    "input_path": "/tmp/uruk-e2e-QgAQmM/fixture.png",
-    "output_path": "/tmp/uruk-e2e-QgAQmM/fixture.converted.png",
+    "input_path": "/tmp/uruk-e2e-LkEbeI/fixture.png",
+    "output_path": "/tmp/uruk-e2e-LkEbeI/fixture.converted.png",
     "target": "crop",
     "status": "done",
     "error": null,
