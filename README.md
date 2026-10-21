@@ -95,11 +95,12 @@ work uses **poppler** (bundled on Windows; the Linux `.deb` declares
 
 ### Honest limits
 
-- **HEIC export**: no open toolchain encodes HEIC. On macOS the engine
-  routes HEIC export through Apple's built-in `sips` (present on every
-  Mac; argument construction is unit-tested, runtime proof pending a
-  real Mac). On Linux/Windows HEIC export is refused with a plain
-  explanation; HEIC *input* converts fine everywhere.
+- **HEIC export**: the engine probes at runtime for a real encoder and
+  uses the first it finds — Apple's built-in `sips` on macOS, else an
+  ImageMagick HEIC writer, else an FFmpeg HEIC writer where the platform
+  provides one (the Linux release build passes a real HEIC-encode test
+  in CI). Where no encoder exists, HEIC export is refused with a plain
+  explanation rather than faked; HEIC *input* converts fine everywhere.
 - **PDF → XLSX is refused**, in-app and by design: a PDF stores drawn
   text, not cells, and no honest route rebuilds spreadsheet structure.
   PDF → DOCX/PPTX/EPUB are text-faithful rebuilds and are labelled so.
